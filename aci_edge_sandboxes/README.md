@@ -614,7 +614,9 @@ schema allows only an array. `ExecRequest::with_env` adds an entry,
 
 Mapped host paths appear in the guest the way MXC's WSLc backend maps them: a
 Windows path `C:\work\src` appears at `/mnt/c/work/src`, and an absolute Linux
-path appears at the same path. Guest paths derive from the resolved host path,
+path appears at the same path. Host paths may contain commas, as MXC's
+`readonlyPaths` and `readwritePaths` allow, so `C:\reports\2026, final` appears
+at `/mnt/c/reports/2026, final`. Guest paths derive from the resolved host path,
 so links, letter case, and Windows short names do not create second guest
 paths for one object. `openvmm::resolve_guest_path` performs the same
 translation, for example to turn a host working directory into a

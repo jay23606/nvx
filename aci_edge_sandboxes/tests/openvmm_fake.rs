@@ -1675,6 +1675,90 @@ fn unrelated_directories_are_exported_side_by_side() {
 }
 
 #[test]
+fn host_paths_with_commas_are_exported_exactly() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let base = fixture.directory.path();
+    // The layout of microsoft/nvx#283: directories whose names hold commas, each with a denied
+    // subdirectory and beside the directory that the text before its last comma names.
+    let alpha = base.join("projects").join("alpha,beta");
+    let reports = base.join("reports").join("2026, final");
+    for path in [&alpha, &reports] {
+        fs::create_dir_all(path.join("secret")).unwrap();
+    }
+    for decoy in ["projects/alpha", "reports/2026"] {
+        fs::create_dir_all(base.join(decoy)).unwrap();
+    }
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![reports.clone()],
+        readwrite_paths: vec![alpha.clone()],
+        denied_paths: vec![alpha.join("secret"), reports.join("secret")],
+    });
+    let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let arguments = fixture.launch_arguments(&sandbox_id);
+    let value = |name: &str| {
+        arguments
+            .windows(2)
+            .filter(|pair| pair[0] == name)
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>()
+    };
+    // Like OpenVMM, the fake reads each child's mode after the last comma, so each child is its
+    // exact directory, with its mode and denied path.
+    let children = value("--mount-child");
+    assert_eq!(children.len(), 2, "{arguments:?}");
+    for (child, (path, mode)) in children
+        .iter()
+        .zip([("projects/alpha,beta", "rw"), ("reports/2026, final", "ro")])
+    {
+        let (_, rest) = child.split_once(',').unwrap();
+        let (host, child_mode) = rest.rsplit_once(',').unwrap();
+        assert!(Path::new(host).ends_with(path), "{child}");
+        assert_eq!(child_mode, mode, "{child}");
+    }
+    let denied = value("--mount-deny");
+    assert_eq!(denied.len(), 2, "{arguments:?}");
+    for (denied, path) in denied
+        .iter()
+        .zip(["projects/alpha,beta/secret", "reports/2026, final/secret"])
+    {
+        assert!(Path::new(denied).ends_with(path), "{denied}");
+    }
+    // The guest binds each at its guest path, which keeps the commas.
+    let table = fixture.mapping_table(&sandbox_id);
+    let mut entries: Vec<(String, bool)> = table
+        .iter()
+        .map(|entry| {
+            (
+                entry["target"].as_str().unwrap().to_owned(),
+                entry["read_only"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    entries.sort();
+    let expected = [(&alpha, false), (&reports, true)].map(|(path, read_only)| {
+        (
+            aci_edge_sandboxes::openvmm::resolve_guest_path(path).unwrap(),
+            read_only,
+        )
+    });
+    assert_eq!(entries, expected);
+    let guest = &expected[0].0;
+    let pwd = nvx
+        .exec(
+            &sandbox_id,
+            &ExecRequest::command_line("pwd").with_cwd(guest.clone()),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(pwd.stdout, format!("{guest}\n").into_bytes());
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
 fn large_mapping_tables_reach_the_guest_in_several_records() {
     let fixture = Fixture::new();
     let nvx = fixture.nvx();

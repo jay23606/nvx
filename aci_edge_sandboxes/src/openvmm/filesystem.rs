@@ -970,6 +970,76 @@ mod tests {
         assert!(table[1].read_only);
     }
 
+    /// The layout of microsoft/nvx#283: directories whose names hold commas, each with a denied
+    /// subdirectory.
+    #[test]
+    fn host_paths_may_contain_commas() {
+        let directory = root();
+        let base = directory.path();
+        let alpha = base.join("projects/alpha,beta");
+        let reports = base.join("reports/2026, final");
+        for path in [&alpha, &reports] {
+            fs::create_dir_all(path.join("secret")).unwrap();
+        }
+        let policy = FilesystemPolicy {
+            readonly_paths: vec![reports.clone()],
+            readwrite_paths: vec![alpha.clone()],
+            denied_paths: vec![alpha.join("secret"), reports.join("secret")],
+        };
+        let mapping = plan(&policy).unwrap().unwrap();
+        let children: Vec<(PathBuf, bool, Vec<PathBuf>)> = mapping
+            .children
+            .iter()
+            .map(|child| (child.root.clone(), child.writable, child.denied.clone()))
+            .collect();
+        assert_eq!(
+            children,
+            [
+                (
+                    canonical(&alpha),
+                    true,
+                    vec![canonical(&alpha.join("secret"))]
+                ),
+                (
+                    canonical(&reports),
+                    false,
+                    vec![canonical(&reports.join("secret"))]
+                ),
+            ]
+        );
+        // OpenVMM reads each child's mode after the last comma, so the host paths keep theirs.
+        let arguments = openvmm_arguments(&mapping);
+        assert_eq!(
+            option_values(&arguments, "--mount-child"),
+            [
+                format!("0,{},rw", display_path(&canonical(&alpha))),
+                format!("1,{},ro", display_path(&canonical(&reports))),
+            ]
+        );
+        assert_eq!(
+            option_values(&arguments, "--mount-deny"),
+            [
+                display_path(&canonical(&alpha.join("secret"))),
+                display_path(&canonical(&reports.join("secret"))),
+            ]
+        );
+        // So do the guest paths, which the control channel carries with their lengths.
+        let mut table: Vec<(String, bool)> = guest_table(&mapping)
+            .into_iter()
+            .map(|map| (map.target, map.read_only))
+            .collect();
+        table.sort();
+        assert_eq!(
+            table,
+            [
+                (guest_path(&canonical(&alpha)).unwrap(), false),
+                (guest_path(&canonical(&reports)).unwrap(), true),
+            ]
+        );
+        assert!(table[0].0.ends_with("/projects/alpha,beta"), "{table:?}");
+        assert!(table[1].0.ends_with("/reports/2026, final"), "{table:?}");
+    }
+
     #[test]
     fn mapped_files_are_exported_alone() {
         let directory = root();

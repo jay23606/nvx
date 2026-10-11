@@ -445,6 +445,72 @@ fn single_files_are_granted_without_their_directories() {
 
 #[test]
 #[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn host_paths_with_commas_keep_their_access() {
+    // The layout of microsoft/nvx#283: a read-write `alpha,beta` and a read-only `2026, final`,
+    // each with a denied subdirectory and beside the directory that the text before its last
+    // comma names.
+    let host = tempfile::tempdir().unwrap();
+    let base = host.path();
+    let alpha = base.join("projects").join("alpha,beta");
+    let reports = base.join("reports").join("2026, final");
+    for (directory, seed) in [(&alpha, "alpha"), (&reports, "reports")] {
+        fs::create_dir_all(directory.join("secret")).unwrap();
+        fs::write(directory.join("seed"), seed).unwrap();
+        fs::write(directory.join("secret").join("key"), "hidden").unwrap();
+    }
+    for decoy in ["projects/alpha", "reports/2026"] {
+        fs::create_dir_all(base.join(decoy)).unwrap();
+        fs::write(base.join(decoy).join("seed"), "decoy").unwrap();
+    }
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![reports.clone()],
+        readwrite_paths: vec![alpha.clone()],
+        denied_paths: vec![alpha.join("secret"), reports.join("secret")],
+    });
+    let (nvx, backend) = client("commas");
+    let sandbox = started(&nvx, &backend, &request);
+    let sandbox_id = id(&sandbox);
+    let paths = [guest_path(&alpha).unwrap(), guest_path(&reports).unwrap()];
+    assert!(paths[0].ends_with("/projects/alpha,beta"), "{paths:?}");
+    assert!(paths[1].ends_with("/reports/2026, final"), "{paths:?}");
+    let output = run(
+        &nvx,
+        sandbox_id,
+        script(
+            "cat \"$1/seed\" \"$2/seed\" && echo written > \"$1/result\" \
+             && ! touch \"$2/result\" 2>/dev/null && ls \"$1\" && ls \"$2\" \
+             && [ ! -e \"$1/secret/key\" ] && [ ! -e \"$2/secret/key\" ]",
+            &paths,
+        ),
+    );
+    assert!(output.outcome.success(), "{output:?}");
+    // Each guest path shows its exact directory, without its denied subdirectory.
+    assert_eq!(
+        output.stdout, b"alphareportsresult\nseed\nseed\n",
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(alpha.join("result")).unwrap(),
+        "written\n"
+    );
+    assert!(!reports.join("result").exists());
+    for directory in [&alpha, &reports] {
+        assert_eq!(
+            fs::read_to_string(directory.join("secret").join("key")).unwrap(),
+            "hidden"
+        );
+    }
+    for decoy in ["projects/alpha", "reports/2026"] {
+        assert_eq!(
+            fs::read_dir(base.join(decoy)).unwrap().count(),
+            1,
+            "{decoy}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
 fn many_mappings_are_mounted() {
     let host = tempfile::tempdir().unwrap();
     let mut readonly_paths = Vec::new();
