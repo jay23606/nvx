@@ -18,7 +18,7 @@ const MAX_RULES: usize = 256;
 ///
 /// Without a network section, or when egress is denied without allow rules and ingress is
 /// denied, no network device is attached. Otherwise the portable profile applies the egress
-/// posture with ingress and host loopback denied; other postures are rejected before
+/// posture and the ingress default with host loopback denied; other postures are rejected before
 /// provisioning by the backend's capabilities.
 pub(crate) fn network_arguments(
     policy: Option<&NetworkPolicy>,
@@ -42,7 +42,7 @@ pub(crate) fn network_arguments(
         "--network-egress",
         egress.default.as_str(),
         "--network-ingress",
-        "deny",
+        policy.ingress.default.as_str(),
         "--host-loopback",
         "deny",
     ]
@@ -224,6 +224,25 @@ mod tests {
             network_arguments(Some(&denied), "10.0.0.2/24")
                 .unwrap()
                 .is_empty()
+        );
+
+        // Ingress needs the device even when egress is denied.
+        let mut ingress = NetworkPolicy::deny_all();
+        ingress.ingress.default = Access::Allow;
+        assert_eq!(
+            network_arguments(Some(&ingress), "10.0.0.2/24").unwrap(),
+            [
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-ingress",
+                "allow",
+                "--host-loopback",
+                "deny",
+            ]
         );
     }
 

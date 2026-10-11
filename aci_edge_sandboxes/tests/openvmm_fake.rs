@@ -896,10 +896,12 @@ fn unsupported_requests_are_rejected_before_anything_runs() {
             .code(),
         ErrorCode::PolicyValidation
     );
-    let mut ingress = NetworkPolicy::deny_all();
-    ingress.ingress.default = Access::Allow;
+    // The backend publishes listeners to private networks, but never to the host itself.
+    let mut host_loopback = NetworkPolicy::deny_all();
+    host_loopback.ingress.default = Access::Allow;
+    host_loopback.ingress.host_loopback = Some(Access::Allow);
     assert_eq!(
-        nvx.provision(&ProvisionRequest::new().with_network(ingress))
+        nvx.provision(&ProvisionRequest::new().with_network(host_loopback))
             .unwrap_err()
             .code(),
         ErrorCode::PolicyValidation
@@ -1370,6 +1372,22 @@ fn launch_arguments_select_the_managed_alpine_guest() {
             .iter()
             .any(|argument| argument == "--net")
     );
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+
+    // Ingress attaches the device under denied egress and keeps host loopback denied.
+    let mut ingress = NetworkPolicy::deny_all();
+    ingress.ingress.default = Access::Allow;
+    let sandbox_id = nvx
+        .provision(&ProvisionRequest::new().with_network(ingress))
+        .unwrap()
+        .sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let arguments = fixture.launch_arguments(&sandbox_id);
+    assert!(has_pair(&arguments, "--net", "10.0.0.2/24"));
+    assert!(has_pair(&arguments, "--network-egress", "deny"));
+    assert!(has_pair(&arguments, "--network-ingress", "allow"));
+    assert!(has_pair(&arguments, "--host-loopback", "deny"));
     nvx.stop(&sandbox_id).unwrap();
     nvx.deprovision(&sandbox_id).unwrap();
 }

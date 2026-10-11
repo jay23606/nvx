@@ -32,7 +32,8 @@
 //! | `filesystem.readonlyPaths`, `readwritePaths` | mapped at their [`guest_path`] | n/a |
 //! | `filesystem.deniedPaths` | hidden inside mapped paths | n/a |
 //! | `network.egress` | default and IPv4 and IPv6 rules applied | n/a |
-//! | `network.ingress`, `hostLoopback` | `deny` only | n/a |
+//! | `network.ingress.default` | `allow` and `deny` applied; see below | n/a |
+//! | `network.ingress.hostLoopback` | `deny` only | n/a |
 //! | `microvm.provision.memoryMib` | applied | n/a |
 //! | `process.commandLine` | n/a | run as `/bin/sh -c <commandLine>`, at most 4096 bytes |
 //! | `process.cwd` | n/a | an absolute guest path of at most 4095 bytes; `/` when omitted |
@@ -56,7 +57,12 @@
 //! Egress rules are expanded
 //! into OpenVMM's IPv4 and IPv6 rules exactly; rules that would need more than 256 OpenVMM rules
 //! are rejected. Egress denied without allow rules, with ingress denied,
-//! attaches no network device. Workloads run as the fixed non-root identity of
+//! attaches no network device. With `network.ingress.default: allow`, OpenVMM listens on every
+//! host address at the TCP and UDP ports where the workload listens, and admits clients on the
+//! host's private networks, whose addresses are not globally reachable, but not clients inside
+//! the guest network, IPv6 link-local clients, or the host itself, because host loopback stays
+//! denied; replies to their connections pass whatever the egress
+//! policy. Workloads run as the fixed non-root identity of
 //! [`OpenVmmConfig::workload_uid`] and [`OpenVmmConfig::workload_gid`] (see
 //! [`OpenVmmConfig::map_host_identity`] for Linux hosts) with no capabilities, read end-of-file on
 //! standard input, and may produce at most 1 MiB of combined output.
@@ -460,6 +466,7 @@ impl Backend for OpenVmmBackend {
         capabilities.exec.max_output_bytes = Some(MAX_OUTPUT_BYTES as u64);
         capabilities.network.egress_allow = true;
         capabilities.network.egress_deny = true;
+        capabilities.network.ingress_allow = true;
         capabilities.network.ingress_deny = true;
         capabilities.network.host_loopback_deny = true;
         capabilities.network.egress_rules = true;

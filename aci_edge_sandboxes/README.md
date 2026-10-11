@@ -347,8 +347,9 @@ provisioned again to accept the change.
   behind the gateway's counterpart, such as `fd00::a00:1`. The guest names the gateway as its
   DNS server in `/etc/resolv.conf` when the policy allows TCP or UDP port 53 to it, and
   otherwise the gateway's IPv6 address when the policy allows DNS to that one. Choose a guest
-  network that contains no address the guest must reach. Ingress must be `deny`, and
-  host-loopback access must be `deny` unless ports are forwarded, as described next.
+  network that contains no address the guest must reach. Unlike with the
+  [OpenVMM backend](#network-rules), ingress must be `deny`, and host-loopback access must be
+  `deny` unless ports are forwarded, as described next.
 
 ### Native proxy and forwarded ports
 
@@ -530,7 +531,7 @@ terminate the VM when the caller exits.
 | `filesystem.deniedPaths` | hidden inside mapped paths | n/a |
 | `network.egress.default` | applied (`allow` or `deny`) | n/a |
 | `network.egress.allow`, `deny` | applied; see [Network rules](#network-rules) | n/a |
-| `network.ingress.default` | `deny` applied; `allow` rejected | n/a |
+| `network.ingress.default` | applied (`allow` or `deny`); see [Network rules](#network-rules) | n/a |
 | `network.ingress.hostLoopback` | `deny` applied (also when omitted); `allow` rejected | n/a |
 | `microvm.provision.memoryMib` | applied | n/a |
 | `process.commandLine` | n/a | run as `/bin/sh -c <commandLine>`; at most 4096 bytes |
@@ -714,6 +715,17 @@ otherwise the guest gets `10.0.0.2/24` behind the profile's NAT gateway
 `10.0.0.1`, which also serves DNS, and `fd00::a00:2/120` behind the gateway's
 IPv6 address `fd00::a00:1`.
 
+With `network.ingress.default: allow`, OpenVMM listens on every host address at
+each TCP and UDP port on which the workload listens, within about a second of
+the workload starting to listen, and relays clients on the host's private
+networks, whose addresses are not globally reachable, to the guest. It refuses
+other clients, clients inside the guest network, which the guest would take for
+its neighbors, IPv6 link-local clients, and the host itself, because host
+loopback stays denied. Replies to admitted clients pass whatever the egress
+policy. A port that a host process already holds is not published, and clients
+on other hosts need the host's firewall to admit them to OpenVMM; see
+[Private-network ingress](../doc/run.md#private-network-ingress).
+
 ### Idempotence and concurrency
 
 - Every provision creates a new sandbox.
@@ -794,7 +806,8 @@ python3 scripts/nvx.py test-aci-edge-sandboxes --backend kvm   # real VM (reposi
   discovered artifacts.
 - `nvx.py test-aci-edge-sandboxes` runs the ignored `openvmm_e2e` tests against a real
   hypervisor with the repository's kernel and Alpine initramfs: the lifecycle,
-  working directories, host path mapping, network rules, and exec environments.
+  working directories, host path mapping, network rules, private-network
+  ingress, and exec environments.
   CI runs them on
   Linux/KVM, Linux/MSHV, and Windows/WHP.
 

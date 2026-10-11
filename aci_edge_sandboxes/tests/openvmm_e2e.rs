@@ -1239,6 +1239,76 @@ fn ipv6_network_policies_are_enforced() {
     }
 }
 
+/// Returns whether a host socket holds TCP `port` on every IPv4 address, as OpenVMM's listener
+/// for a published guest port does.
+fn published(port: u16) -> bool {
+    std::net::TcpListener::bind(("0.0.0.0", port)).is_err()
+}
+
+fn wait_until(mut condition: impl FnMut() -> bool, description: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !condition() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting until {description}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn private_network_ingress_publishes_workload_listeners() {
+    use std::io::Read as _;
+    use std::io::Write as _;
+
+    let (nvx, backend) = client("ingress");
+    let port = std::net::TcpListener::bind(("0.0.0.0", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let listen = || ExecRequest::command_line(format!("timeout 10 nc -l -p {port}"));
+    let mut ingress = NetworkPolicy::deny_all();
+    ingress.ingress.default = Access::Allow;
+    let sandbox = started(
+        &nvx,
+        &backend,
+        &ProvisionRequest::new().with_network(ingress),
+    );
+    let listener = nvx.exec(id(&sandbox), &listen()).unwrap();
+    wait_until(|| published(port), "the workload's port is published");
+    // The host is not a private-network client: the published listener completes its
+    // connection and then resets it, so nothing reaches the workload. A marker that the
+    // workload printed would reveal a connection that reached it.
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let _ = stream.write_all(b"NVX-HOST-PROBE\n");
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut buffer = [0u8; 16];
+    if let Ok(count) = stream.read(&mut buffer) {
+        assert_eq!(count, 0, "the host reached the workload");
+    }
+    let output = listener.wait_with_output().unwrap();
+    assert!(output.stdout.is_empty(), "{output:?}");
+    wait_until(|| !published(port), "the closed listener is withdrawn");
+    drop(sandbox);
+
+    // With ingress denied, nothing is published.
+    let sandbox = started(
+        &nvx,
+        &backend,
+        &ProvisionRequest::new().with_network(NetworkPolicy::egress(Access::Allow)),
+    );
+    let listener = nvx.exec(id(&sandbox), &listen()).unwrap();
+    thread::sleep(Duration::from_secs(2));
+    assert!(!published(port));
+    listener.canceller().cancel().unwrap();
+    let _ = listener.wait();
+}
+
 #[test]
 #[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
 fn network_port_ranges_are_enforced() {
