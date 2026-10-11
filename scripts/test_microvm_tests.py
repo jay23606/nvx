@@ -4,6 +4,7 @@
 import argparse
 import ast
 import errno
+import functools
 import inspect
 import io
 import ipaddress
@@ -52,6 +53,11 @@ def _posix_shell() -> str | None:
         if git_shell is not None and git_shell.is_file():
             shell = str(git_shell)
     return shell
+
+
+# The line that releases the private-network ingress guest after the host's
+# probes.
+PRIVATE_INGRESS_RELEASE = microvm_tests.PRIVATE_INGRESS_CHECKED + b"\n"
 
 
 # What `/usr/bin/env` prints in the emulated workload without a supplied environment
@@ -218,6 +224,11 @@ def _restore_processors_measure(
         )
 
     return MagicMock(side_effect=measure)
+
+
+def _fresh_openvmm_command(*_args: object, **_kwargs: object) -> list[str]:
+    # A new list for every call, which the scenario extends with its policy.
+    return ["openvmm"]
 
 
 class MicrovmTestParserTests(unittest.TestCase):
@@ -2739,6 +2750,324 @@ class MicrovmTests(unittest.TestCase):
                 self.assertEqual(guest.call_count, 1)
                 self.assertNotIn("--host-loopback", guest.call_args.args[0])
                 process.assert_not_called()
+
+    def _run_private_ingress_script(
+        self,
+        *,
+        ingress: str,
+        expect: str,
+        cmdline: str,
+        ingress_running: bool,
+        tcp_request: bool,
+        udp_request: bool,
+        outbound_status: int = 1,
+        outbound_port: str = "0",
+    ) -> subprocess.CompletedProcess[str]:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        header = "  sl  local_address rem_address st\n"
+        tcp6 = header + (
+            f"   0: {'0' * 32}:1F90 {'0' * 32}:0000 0A 00000000:00000000 00:00000000\n"
+        )
+        udp6 = header + (
+            f"   0: {'0' * 32}:1F90 {'0' * 32}:0000 07 00000000:00000000 00:00000000\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "proc" / "net").mkdir(parents=True)
+            (root / "proc" / "cmdline").write_text(cmdline + "\n", encoding="utf-8")
+            for name, table in (
+                ("tcp", header),
+                ("tcp6", tcp6),
+                ("udp", header),
+                ("udp6", udp6),
+            ):
+                (root / "proc" / "net" / name).write_text(table, encoding="utf-8")
+            script = (
+                microvm_tests._render_script(
+                    "private-network-ingress.sh.in",
+                    INGRESS=ingress,
+                    EXPECT=expect,
+                    TCP_PORT="8080",
+                    UDP_PORT="8080",
+                    GATEWAY_IPV4="192.0.2.1",
+                    OUTBOUND_PORT=outbound_port,
+                    COMPLETION_MARKER="NVX-TEST-OK",
+                )
+                .replace("nvx-exit", "nvx_exit")
+                .replace("/proc/", f"{root.as_posix()}/proc/")
+                .replace("/tmp/nvx-ingress-", f"{root.as_posix()}/nvx-ingress-")
+            )
+            tcp = "echo NVX-PRIVATE-INGRESS-TCP-REQUEST" if tcp_request else ":"
+            udp = "echo NVX-PRIVATE-INGRESS-UDP-REQUEST" if udp_request else ":"
+            # The stubbed servers finish at once; wait for their output before
+            # releasing the guest.
+            script = script.replace("read -r release", "wait; read -r release")
+            path = root / "private-network-ingress.sh"
+            path.write_text(
+                "sleep() { :; }\n"
+                f"pidof() {{ return {0 if ingress_running else 1}; }}\n"
+                'nc() { case "$*" in\n'
+                f"'-l -p '*) {tcp} ;;\n"
+                f"'-u -l -p '*) {udp} ;;\n"
+                f"*) return {outbound_status} ;;\n"
+                "esac; }\n"
+                'nvx_exit() { exit "$1"; }\n' + script,
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = subprocess.run(
+                [shell, path.as_posix()],
+                input=PRIVATE_INGRESS_RELEASE,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            return subprocess.CompletedProcess(
+                result.args,
+                result.returncode,
+                result.stdout.decode(errors="replace"),
+                result.stderr.decode(errors="replace"),
+            )
+
+    def test_private_network_ingress_script_checks_policy_and_traffic(self):
+        token = "console=hvc0 virtnet_ip=192.0.2.2 virtnet_ingress=allow"
+        plain = "console=hvc0 virtnet_ip=192.0.2.2"
+        for label, run, expected in (
+            (
+                "reached",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="allow",
+                    expect="reached",
+                    cmdline=token,
+                    ingress_running=True,
+                    tcp_request=True,
+                    udp_request=True,
+                    outbound_port="4000",
+                ),
+                0,
+            ),
+            (
+                "unpublished",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="deny",
+                    expect="unreached",
+                    cmdline=plain,
+                    ingress_running=False,
+                    tcp_request=False,
+                    udp_request=False,
+                ),
+                0,
+            ),
+            (
+                "token-missing",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="allow",
+                    expect="reached",
+                    cmdline=plain,
+                    ingress_running=True,
+                    tcp_request=True,
+                    udp_request=True,
+                ),
+                72,
+            ),
+            (
+                "announcer-missing",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="allow",
+                    expect="reached",
+                    cmdline=token,
+                    ingress_running=False,
+                    tcp_request=True,
+                    udp_request=True,
+                ),
+                71,
+            ),
+            (
+                "announcer-unexpected",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="deny",
+                    expect="unreached",
+                    cmdline=plain,
+                    ingress_running=True,
+                    tcp_request=False,
+                    udp_request=False,
+                ),
+                73,
+            ),
+            (
+                "tcp-missed",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="allow",
+                    expect="reached",
+                    cmdline=token,
+                    ingress_running=True,
+                    tcp_request=False,
+                    udp_request=True,
+                ),
+                78,
+            ),
+            (
+                "udp-leaked",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="allow",
+                    expect="unreached",
+                    cmdline=token,
+                    ingress_running=True,
+                    tcp_request=False,
+                    udp_request=True,
+                ),
+                81,
+            ),
+            (
+                "outbound-opened",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="allow",
+                    expect="reached",
+                    cmdline=token,
+                    ingress_running=True,
+                    tcp_request=True,
+                    udp_request=True,
+                    outbound_status=0,
+                    outbound_port="4000",
+                ),
+                83,
+            ),
+            (
+                "outbound-failed-to-run",
+                functools.partial(
+                    self._run_private_ingress_script,
+                    ingress="allow",
+                    expect="reached",
+                    cmdline=token,
+                    ingress_running=True,
+                    tcp_request=True,
+                    udp_request=True,
+                    outbound_status=127,
+                    outbound_port="4000",
+                ),
+                84,
+            ),
+        ):
+            with self.subTest(label):
+                result = run()
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, expected, output)
+                # Policy mismatches fail before the servers start.
+                self.assertEqual(
+                    "NVX-PRIVATE-INGRESS-LISTENING" in result.stdout,
+                    expected not in (71, 72, 73),
+                    output,
+                )
+                if expected:
+                    self.assertNotIn("NVX-TEST-OK", result.stdout)
+                else:
+                    self.assertIn("NVX-TEST-OK", result.stdout)
+
+    def test_private_network_ingress_scenario_covers_three_policies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests, "_run_private_ingress_guest") as guest,
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests,
+                    "workload_boot_command",
+                    side_effect=_fresh_openvmm_command,
+                ),
+            ):
+                process.return_value.__enter__.return_value.wait.return_value = (
+                    openvmm_process.OpenvmmProcessResult(
+                        2, b"microVM snapshots do not support --network-ingress allow"
+                    )
+                )
+                microvm_tests.run_private_network_ingress(
+                    Path("openvmm"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=5,
+                    output_dir=Path(temporary),
+                )
+        self.assertEqual(guest.call_count, 3)
+        policies = [
+            (
+                call.args[0][call.args[0].index("--network-egress") + 1],
+                call.args[0][call.args[0].index("--network-ingress") + 1],
+                call.args[0][call.args[0].index("--host-loopback") + 1]
+                if "--host-loopback" in call.args[0]
+                else None,
+                call.kwargs["ingress"],
+                call.kwargs["expect"],
+                call.kwargs["outbound_port"] != 0,
+            )
+            for call in guest.call_args_list
+        ]
+        self.assertEqual(
+            policies,
+            [
+                ("deny", "allow", "allow", "allow", "reached", True),
+                ("deny", "allow", "deny", "allow", "unreached", False),
+                ("allow", "deny", None, "deny", "unreached", False),
+            ],
+        )
+        snapshot = process.call_args.args[0]
+        self.assertIn("--snapshot-destination", snapshot)
+        self.assertEqual(snapshot[snapshot.index("--network-ingress") + 1], "allow")
+
+    def test_private_network_ingress_snapshot_must_be_rejected_before_boot(self):
+        diagnostic = b"microVM snapshots do not support --network-ingress allow"
+        for result in (
+            openvmm_process.OpenvmmProcessResult(0, diagnostic),
+            openvmm_process.OpenvmmProcessResult(2, b"other failure"),
+            openvmm_process.OpenvmmProcessResult(
+                2, diagnostic + b"\n" + microvm_tests.BOOT_MARKER
+            ),
+        ):
+            with (
+                self.subTest(result=result),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(microvm_tests, "_run_private_ingress_guest"),
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests,
+                    "workload_boot_command",
+                    side_effect=_fresh_openvmm_command,
+                ),
+            ):
+                process.return_value.__enter__.return_value.wait.return_value = result
+                with self.assertRaisesRegex(RuntimeError, "before boot"):
+                    microvm_tests.run_private_network_ingress(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=5,
+                        output_dir=Path(temporary),
+                    )
+
+    def test_publication_probe_detects_a_held_port(self):
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            holder.bind(("0.0.0.0", 0))
+            port = int(holder.getsockname()[1])
+            self.assertTrue(microvm_tests._publishes(port, socket.SOCK_STREAM))
+        finally:
+            holder.close()
+        self.assertFalse(microvm_tests._publishes(port, socket.SOCK_STREAM))
+        port = microvm_tests._private_ingress_port()
+        self.assertFalse(microvm_tests._publishes(port, socket.SOCK_STREAM))
+        self.assertFalse(microvm_tests._publishes(port, socket.SOCK_DGRAM))
 
     def test_host_loopback_udp_probes_reject_failed_sender(self):
         shell = _posix_shell()

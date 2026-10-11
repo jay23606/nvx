@@ -19,8 +19,8 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Sequence
-from contextlib import ExitStack
+from collections.abc import Callable, Sequence
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISUID
@@ -111,6 +111,7 @@ MICROVM_TEST_SCENARIOS = (
     "managed-lifecycle",
     "managed-exec-config",
     "network-snapshot",
+    "private-network-ingress",
     "restore-downtime",
     "restore-memory",
     "restore-processors",
@@ -206,6 +207,15 @@ HOST_LOOPBACK_PORT_BIND_ATTEMPTS = 16
 # IANA's dynamic port range, which is also Windows' default. The host-loopback
 # scenario draws the port of each TCP and UDP listener pair from it.
 HOST_LOOPBACK_PORT_RANGE = (49152, 65535)
+PRIVATE_INGRESS_LISTENING_MARKER = b"NVX-PRIVATE-INGRESS-LISTENING"
+PRIVATE_INGRESS_CHECKED = b"NVX-PRIVATE-INGRESS-CHECKED"
+PRIVATE_INGRESS_REACHED_MARKER = b"NVX-PRIVATE-INGRESS-REACHED-OK"
+PRIVATE_INGRESS_REFUSED_MARKER = b"NVX-PRIVATE-INGRESS-REFUSED-OK"
+PRIVATE_INGRESS_UNPUBLISHED_MARKER = b"NVX-PRIVATE-INGRESS-UNPUBLISHED-OK"
+PRIVATE_INGRESS_TCP_REQUEST = b"NVX-PRIVATE-INGRESS-TCP-REQUEST\n"
+PRIVATE_INGRESS_TCP_REPLY = b"NVX-PRIVATE-INGRESS-TCP-REPLY\n"
+PRIVATE_INGRESS_UDP_REQUEST = b"NVX-PRIVATE-INGRESS-UDP-REQUEST\n"
+PRIVATE_INGRESS_UDP_REPLY = b"NVX-PRIVATE-INGRESS-UDP-REPLY\n"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -3503,6 +3513,361 @@ def run_host_loopback_rejections(
             raise RuntimeError(
                 f"invalid host-loopback policy {name} was not rejected before boot"
             )
+
+
+def _private_ingress_port() -> int:
+    """Draw a port that the host can publish for both TCP and UDP."""
+    last_error: OSError | None = None
+    for port in _host_loopback_port_candidates():
+        with ExitStack() as sockets:
+            try:
+                for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                    probe = socket.socket(socket.AF_INET, kind)
+                    sockets.callback(probe.close)
+                    probe.bind(("0.0.0.0", port))
+            except OSError as error:
+                last_error = error
+                continue
+        return port
+    raise RuntimeError(
+        "failed to find a port free for TCP and UDP on every host address"
+    ) from last_error
+
+
+def _publishes(port: int, kind: socket.SocketKind) -> bool:
+    """Return whether a host socket holds ``port`` on every IPv4 address.
+
+    During the scenario, that socket is OpenVMM's listener for the guest port.
+    """
+    probe = socket.socket(socket.AF_INET, kind)
+    try:
+        probe.bind(("0.0.0.0", port))
+    except OSError:
+        return True
+    finally:
+        probe.close()
+    return False
+
+
+def _wait_until(condition: Callable[[], bool], timeout: float, failure: str) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(failure)
+        time.sleep(0.05)
+
+
+def _host_ipv4_addresses() -> list[str]:
+    """Return the host's own non-loopback IPv4 addresses that are known."""
+    addresses: set[str] = set()
+    with suppress(OSError):
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addresses.add(str(info[4][0]))
+    with suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        # Connecting a UDP socket sends nothing; it selects the source address
+        # of the default route.
+        route.connect(("192.0.2.1", 9))
+        addresses.add(route.getsockname()[0])
+    return sorted(
+        address
+        for address in addresses
+        if not ipaddress.ip_address(address).is_loopback
+    )
+
+
+def _udp_client(timeout: float) -> socket.socket:
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client.bind(("127.0.0.1", 0))
+    client.settimeout(timeout)
+    return client
+
+
+def _private_ingress_command(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    memory_mib: int,
+    *policy: str,
+) -> list[str]:
+    command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0",
+        network=DIRECTIONAL_NETWORK_CIDR,
+    )
+    command.extend(policy)
+    return command
+
+
+def _run_private_ingress_guest(
+    command: Sequence[str],
+    *,
+    ingress: str,
+    expect: str,
+    port: int,
+    outbound_port: int,
+    completion_marker: bytes,
+    timeout: float,
+    log_path: Path,
+    probe: Callable[[], None],
+) -> None:
+    """Boot a guest that serves TCP and UDP on ``port``, run ``probe`` from the
+    host while it listens, and require the guest to observe ``expect``."""
+    with OpenvmmProcess(command, log_path) as process:
+        process.wait_for(BOOT_MARKER, timeout)
+        _stage_script(
+            process,
+            "/tmp/nvx-private-network-ingress",
+            "NVX_PRIVATE_NETWORK_INGRESS",
+            _render_script(
+                "private-network-ingress.sh.in",
+                INGRESS=ingress,
+                EXPECT=expect,
+                TCP_PORT=str(port),
+                UDP_PORT=str(port),
+                GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                OUTBOUND_PORT=str(outbound_port),
+                COMPLETION_MARKER=completion_marker.decode(),
+            ),
+        )
+        process.wait_for_line(PRIVATE_INGRESS_LISTENING_MARKER, timeout)
+        probe()
+        process.send_line(PRIVATE_INGRESS_CHECKED.decode())
+        process.wait_for_line(completion_marker, timeout)
+        result = process.wait(timeout)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"private-network ingress guest exited with {result.returncode}"
+        )
+
+
+def run_private_network_ingress(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Verify that ``--network-ingress allow`` publishes the guest's listeners.
+
+    A single host has no private-network peer other than itself, which the
+    published listeners refuse unless host loopback is allowed. The scenario
+    therefore exchanges TCP and UDP with the guest's servers from the host with
+    host loopback allowed and egress denied, which also requires the guest's
+    replies to pass; it requires the host's own connections to be refused with
+    host loopback denied, and nothing to be published with ingress denied.
+    Unit tests classify the peers of other hosts.
+    """
+    port = _private_ingress_port()
+    outbound = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    outbound.bind(("127.0.0.1", 0))
+    outbound.listen(1)
+    outbound_port = int(outbound.getsockname()[1])
+
+    def exchange() -> None:
+        _wait_until(
+            lambda: (
+                _publishes(port, socket.SOCK_STREAM)
+                and _publishes(port, socket.SOCK_DGRAM)
+            ),
+            timeout,
+            f"guest port {port} was not published to the host",
+        )
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as client:
+            client.settimeout(timeout)
+            reply = b""
+            while not reply.endswith(b"\n"):
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+            if reply != PRIVATE_INGRESS_TCP_REPLY:
+                raise RuntimeError(f"unexpected guest TCP reply: {reply!r}")
+            client.sendall(PRIVATE_INGRESS_TCP_REQUEST)
+            client.shutdown(socket.SHUT_WR)
+        with _udp_client(0.5) as client:
+            deadline = time.monotonic() + timeout
+            while True:
+                client.sendto(PRIVATE_INGRESS_UDP_REQUEST, ("127.0.0.1", port))
+                try:
+                    reply, source = client.recvfrom(4096)
+                    break
+                except (TimeoutError, ConnectionResetError):
+                    if time.monotonic() >= deadline:
+                        raise
+            if reply != PRIVATE_INGRESS_UDP_REPLY or source != ("127.0.0.1", port):
+                raise RuntimeError(
+                    f"unexpected guest UDP reply {reply!r} from {source}"
+                )
+        # The guest's TCP server accepted its one client and closed, so its port
+        # is withdrawn, while the UDP server still uses its own.
+        _wait_until(
+            lambda: not _publishes(port, socket.SOCK_STREAM),
+            timeout,
+            f"closed guest TCP port {port} remained published",
+        )
+
+    try:
+        _run_private_ingress_guest(
+            _private_ingress_command(
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib,
+                "--network-egress",
+                "deny",
+                "--network-ingress",
+                "allow",
+                "--host-loopback",
+                "allow",
+            ),
+            ingress="allow",
+            expect="reached",
+            port=port,
+            outbound_port=outbound_port,
+            completion_marker=PRIVATE_INGRESS_REACHED_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "private-network-ingress-host-allowed.log",
+            probe=exchange,
+        )
+        outbound.settimeout(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS)
+        try:
+            unexpected, _ = outbound.accept()
+        except TimeoutError:
+            pass
+        else:
+            unexpected.close()
+            raise RuntimeError("denied egress opened a guest connection to the host")
+    finally:
+        outbound.close()
+
+    port = _private_ingress_port()
+
+    def refused() -> None:
+        _wait_until(
+            lambda: (
+                _publishes(port, socket.SOCK_STREAM)
+                and _publishes(port, socket.SOCK_DGRAM)
+            ),
+            timeout,
+            f"guest port {port} was not published to the host",
+        )
+        # The host completes the handshake with the published listener, which
+        # then resets connections from the host itself.
+        for address in ["127.0.0.1", *_host_ipv4_addresses()]:
+            with socket.create_connection((address, port), timeout=timeout) as client:
+                client.settimeout(timeout)
+                try:
+                    data = client.recv(4096)
+                except (ConnectionResetError, ConnectionAbortedError):
+                    data = b""
+                if data:
+                    raise RuntimeError(
+                        f"a refused connection from {address} reached the guest: {data!r}"
+                    )
+        with _udp_client(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS) as client:
+            for _ in range(3):
+                client.sendto(PRIVATE_INGRESS_UDP_REQUEST, ("127.0.0.1", port))
+                try:
+                    reply = client.recv(4096)
+                except (TimeoutError, ConnectionResetError):
+                    continue
+                raise RuntimeError(f"a refused datagram drew a reply: {reply!r}")
+
+    _run_private_ingress_guest(
+        _private_ingress_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            "--network-egress",
+            "deny",
+            "--network-ingress",
+            "allow",
+            "--host-loopback",
+            "deny",
+        ),
+        ingress="allow",
+        expect="unreached",
+        port=port,
+        outbound_port=0,
+        completion_marker=PRIVATE_INGRESS_REFUSED_MARKER,
+        timeout=timeout,
+        log_path=output_dir / "private-network-ingress-host-denied.log",
+        probe=refused,
+    )
+
+    port = _private_ingress_port()
+
+    def unpublished() -> None:
+        # Longer than the guest needs to announce a UDP listener.
+        time.sleep(2)
+        if _publishes(port, socket.SOCK_STREAM) or _publishes(port, socket.SOCK_DGRAM):
+            raise RuntimeError("ingress deny published a guest port")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+                pass
+        except OSError:
+            return
+        raise RuntimeError("ingress deny accepted a connection toward the guest")
+
+    _run_private_ingress_guest(
+        _private_ingress_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            "--network-egress",
+            "allow",
+            "--network-ingress",
+            "deny",
+        ),
+        ingress="deny",
+        expect="unreached",
+        port=port,
+        outbound_port=0,
+        completion_marker=PRIVATE_INGRESS_UNPUBLISHED_MARKER,
+        timeout=timeout,
+        log_path=output_dir / "private-network-ingress-denied.log",
+        probe=unpublished,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="nvx-ingress-snapshot-") as temporary:
+        invalid = _private_ingress_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            "--network-ingress",
+            "allow",
+            "--snapshot-destination",
+            str(Path(temporary) / "snapshot"),
+        )
+        with OpenvmmProcess(
+            invalid,
+            output_dir / "private-network-ingress-snapshot.log",
+        ) as process:
+            result = process.wait(timeout)
+    if (
+        result.returncode == 0
+        or b"microVM snapshots do not support --network-ingress allow"
+        not in result.output
+        or BOOT_MARKER in result.output
+    ):
+        raise RuntimeError(
+            "a snapshot with private-network ingress was not rejected before boot"
+        )
 
 
 IO_REPARSE_TAG_LX_SYMLINK = 0xA000001D
@@ -7038,6 +7403,17 @@ def run(args: argparse.Namespace) -> int:
     if "host-loopback-policy" in scenarios:
         print(f"Running microVM host-loopback policy on OpenVMM/{args.backend}")
         run_host_loopback_policy(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "private-network-ingress" in scenarios:
+        print(f"Running microVM private-network ingress on OpenVMM/{args.backend}")
+        run_private_network_ingress(
             executable,
             kernel,
             initrd,

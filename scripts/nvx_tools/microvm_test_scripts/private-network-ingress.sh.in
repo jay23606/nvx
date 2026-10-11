@@ -1,0 +1,92 @@
+set -eu
+ingress=@INGRESS@
+expect=@EXPECT@
+outbound_port=@OUTBOUND_PORT@
+
+fail() {
+    code="$1"
+    echo "NVX-PRIVATE-INGRESS-FAIL code=$code"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+# Waits until the kernel lists a socket on the hexadecimal port in state $2 of
+# the tables that follow.
+wait_for_socket() {
+    port_hex=$(printf '%04X' "$1")
+    state=$2
+    shift 2
+    tries=0
+    while ! awk -v port=":$port_hex" -v state="$state" \
+        '$2 ~ port "$" && $4 == state { found = 1 } END { exit !found }' "$@"; do
+        [ "$tries" -lt 100 ] || return 1
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+}
+
+if grep -q 'virtnet_ingress=allow' /proc/cmdline; then
+    [ "$ingress" = allow ] || fail 70
+    pidof nvx-ingress >/dev/null || fail 71
+else
+    [ "$ingress" = deny ] || fail 72
+    if pidof nvx-ingress >/dev/null; then
+        fail 73
+    fi
+fi
+
+rm -f /tmp/nvx-ingress-tcp /tmp/nvx-ingress-udp
+# Each server answers its first client and keeps its sending side open, so it
+# reads what the client sends.
+{
+    printf 'NVX-PRIVATE-INGRESS-TCP-REPLY\n'
+    sleep 20
+} | nc -l -p @TCP_PORT@ -w 20 >/tmp/nvx-ingress-tcp 2>/dev/null &
+{
+    printf 'NVX-PRIVATE-INGRESS-UDP-REPLY\n'
+    sleep 20
+} | nc -u -l -p @UDP_PORT@ -w 20 >/tmp/nvx-ingress-udp 2>/dev/null &
+wait_for_socket @TCP_PORT@ 0A /proc/net/tcp /proc/net/tcp6 || fail 74
+wait_for_socket @UDP_PORT@ 07 /proc/net/udp /proc/net/udp6 || fail 75
+echo NVX-PRIVATE-INGRESS-LISTENING
+
+read -r release || fail 76
+[ "$release" = NVX-PRIVATE-INGRESS-CHECKED ] || fail 77
+
+# The servers may write what they received after the host's release arrives.
+wait_for_line() {
+    tries=0
+    while ! grep -qx "$1" "$2" 2>/dev/null; do
+        [ "$tries" -lt 100 ] || return 1
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+}
+
+case "$expect" in
+    reached)
+        wait_for_line NVX-PRIVATE-INGRESS-TCP-REQUEST /tmp/nvx-ingress-tcp || fail 78
+        wait_for_line NVX-PRIVATE-INGRESS-UDP-REQUEST /tmp/nvx-ingress-udp || fail 79
+        ;;
+    unreached)
+        [ ! -s /tmp/nvx-ingress-tcp ] || fail 80
+        [ ! -s /tmp/nvx-ingress-udp ] || fail 81
+        ;;
+    *)
+        fail 82
+        ;;
+esac
+
+if [ "$outbound_port" != 0 ]; then
+    # Egress stays denied for connections that the guest opens itself. A
+    # denied connection fails with 1; execution failures must not pass.
+    if printf 'NVX-PRIVATE-INGRESS-OUTBOUND\n' |
+        nc -w 2 @GATEWAY_IPV4@ "$outbound_port" >/dev/null 2>&1; then
+        fail 83
+    else
+        [ "$?" -eq 1 ] || fail 84
+    fi
+fi
+
+echo @COMPLETION_MARKER@
+nvx-exit 0
