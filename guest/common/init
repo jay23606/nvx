@@ -248,6 +248,17 @@ if [ -n "$nip" ]; then
             IFS=$oldifs
         fi
 
+        # With private-network ingress, the gateway learns the workload's
+        # listeners from nvx-ingress and publishes them on the host.
+        ningress=$(sed -n 's/.*virtnet_ingress=\([^ ]*\).*/\1/p' /proc/cmdline)
+        if [ "$ningress" = allow ]; then
+            if [ -n "$ngw" ] && [ -x /sbin/nvx-ingress ]; then
+                /sbin/nvx-ingress "$ngw" </dev/null &
+            else
+                virtnet_error "private-network ingress needs /sbin/nvx-ingress and an IPv4 gateway"
+            fi
+        fi
+
         nprobe=$(sed -n 's/.*virtnet_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
         if [ -n "$nprobe" ]; then
             if ping -c 1 -W 1 "$nprobe" >/tmp/virtnet-probe.log 2>&1; then

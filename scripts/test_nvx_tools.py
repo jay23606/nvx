@@ -8960,6 +8960,12 @@ class BuildTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("        musl-tools \\\n", dockerfile)
+        self.assertIn(
+            "    for helper in "
+            + " ".join(InitramfsBuildConstants.MUSL_STATIC_HELPERS)
+            + "; do \\\n        musl-gcc ",
+            dockerfile,
+        )
         self.assertEqual(helpers[probe]["source_sha256"], common.sha256_file(source))
         self.assertEqual(
             helpers[probe]["binary_sha256"],
