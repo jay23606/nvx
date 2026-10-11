@@ -101,7 +101,9 @@ from nvx_tools.sandbox import (
     aggregate_child_name,
     aggregate_command_line_fragment,
     aggregate_share_tokens,
+    mount_argument,
     mount_kind,
+    parse_mount_value,
     parse_workload_identity,
     require_mount_owner_supported,
 )
@@ -184,18 +186,6 @@ def _sandbox_mounts(args: argparse.Namespace) -> tuple[SandboxMount, ...]:
         )
         parsed.append(replace(mount, kind=mount_kind(mount.host_path)))
     return tuple(parsed)
-
-
-def _run_share(value: str) -> tuple[str, str, str]:
-    """Split a run --mount into its guest target, host path, and access."""
-    fields = value.split(",")
-    if len(fields) not in (2, 3):
-        raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
-    target, host_path = fields[:2]
-    access = fields[2] if len(fields) == 3 else "ro"
-    if access not in ("ro", "rw"):
-        raise ScriptError(f"unsupported --mount mode {access!r}; choose ro or rw")
-    return target, host_path, access
 
 
 def _validate_run_share_targets(targets: list[str]) -> None:
@@ -567,13 +557,13 @@ def command_run(args: argparse.Namespace) -> None:
             command.extend(["--memory-capacity", f"{args.memory_capacity_mib}M"])
     if args.cpu_profile is not None:
         command.extend(["--cpu-profile", args.cpu_profile])
-    shares = [_run_share(value) for value in args.mount]
+    shares = [parse_mount_value(value) for value in args.mount]
     # A file is shared as the child of an aggregate, even alone, because the
     # guest mounts the device's root, which is a directory.
     kinds = [mount_kind(Path(host_path)) for _, host_path, _ in shares]
     aggregate = len(shares) > 1 or "file" in kinds
     if shares and not aggregate:
-        command.extend(["--mount", args.mount[0]])
+        command.extend(["--mount", mount_argument(*shares[0])])
     elif shares:
         _validate_run_share_targets([target for target, _, _ in shares])
         command.extend(["--mount-aggregate", AGGREGATE_MOUNT_TARGET])
@@ -1183,8 +1173,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="GUEST_TARGET,HOST_PATH[,ro|rw]",
         help=(
             "live-share a host directory, or a single regular host file without "
-            "its directory; repeat for more shares, each with its own guest "
-            "target and mode, as children of one virtio-fs device"
+            "its directory; the mode follows the last comma, so HOST_PATH may "
+            "contain commas when the mode is given; repeat for more shares, "
+            "each with its own guest target and mode, as children of one "
+            "virtio-fs device"
         ),
     )
     run.add_argument("--mount-deny", action="append", type=Path, default=[])
@@ -1349,9 +1341,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="GUEST_TARGET,HOST_PATH[,ro|rw]",
         help=(
             "live-share a host directory, or a single regular host file without "
-            "its directory, inside the container rootfs; repeat to attach more "
-            "shares, each with its own target and mode, as children of one "
-            "virtio-fs device"
+            "its directory, inside the container rootfs; the mode follows the "
+            "last comma, so HOST_PATH may contain commas when the mode is given; "
+            "repeat to attach more shares, each with its own target and mode, as "
+            "children of one virtio-fs device"
         ),
     )
     sandbox.add_argument(

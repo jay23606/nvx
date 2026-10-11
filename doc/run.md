@@ -440,9 +440,20 @@ python scripts\nvx.py run `
 ```
 
 Use `ro` for read-only access. The guest target must be an absolute Linux path.
-Host paths containing commas are unsupported. Repeat `--mount` to attach more
-directories, each with its own target and access mode, for example a
-read-write workspace next to a read-only tool cache:
+It ends at the first comma, and the mode follows the last comma, so a host
+path may contain commas when the mode is given, which it then requires:
+
+```powershell
+python scripts\nvx.py run `
+  --mount "/mnt/alpha,C:\projects\alpha,beta,rw" `
+  --mount "/mnt/reports,C:\reports\2026, final,ro" `
+  --mount-deny "C:\projects\alpha,beta\secrets" `
+  --mount-deny "C:\reports\2026, final\secrets"
+```
+
+Repeat `--mount` to attach more directories, each with its own target and
+access mode, for example a read-write workspace next to a read-only tool
+cache:
 
 ```bash
 python3 scripts/nvx.py run \
@@ -649,7 +660,9 @@ enters only the assembled root with `chroot`, because Linux cannot
 `--mount GUEST_TARGET,HOST_PATH[,ro|rw]` (default `ro`) options, each with its
 own guest target and access mode, plus repeatable `--mount-deny HOST_PATH`,
 `--mount-allow HOST_PATH`, and `--mount-write HOST_PATH` rules (see
-[Access policy](#access-policy)). OpenVMM exports one host directory through
+[Access policy](#access-policy)). As for `run`, the mode follows the last
+comma, so a host path may contain commas when the mode is given. OpenVMM
+exports one host directory through
 the microVM's virtio-fs device, and several shares, or a shared file, as the
 children of an aggregate on that device, and enforces each share's access mode
 and policy on the host side, so edits are visible in both directions without
@@ -727,7 +740,8 @@ other shares.
 A configuration with allowed or writable paths uses format 5, which earlier
 NVX releases reject rather than start a share without its access policy.
 A configuration with a shared file uses format 6, which earlier NVX releases
-reject rather than start without the file.
+reject rather than start without the file. A host path with commas keeps the
+configuration's format, because earlier NVX releases already refuse it.
 
 #### Access policy
 

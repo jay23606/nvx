@@ -11822,17 +11822,71 @@ class SandboxTests(unittest.TestCase):
     def test_mount_parser_rejects_malformed_specifications(self):
         for value, message in (
             ("/workspace", "GUEST_TARGET,HOST_PATH"),
-            ("/workspace,host,rw,extra", "GUEST_TARGET,HOST_PATH"),
             ("/workspace,", "host path is empty"),
-            ("/workspace,host,rx", "unsupported sandbox mount mode"),
+            ("/workspace,,rw", "host path is empty"),
+            ("/workspace,host,rx", "unsupported --mount mode 'rx'"),
+            # With more than one comma, the value must end in the mode, which
+            # the error suggests for a host path that contains commas.
+            ("/workspace,host,rw,extra", "mode 'extra'.*if HOST_PATH contains commas"),
+            ("/workspace,alpha,beta", "mode 'beta'.*if HOST_PATH contains commas"),
         ):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(common.ScriptError, message):
                     sandbox.SandboxMount.parse(value)
-        with self.assertRaisesRegex(common.ScriptError, "commas"):
-            sandbox.SandboxMount(guest_target="/workspace", host_path=Path("a,b"))
+        with self.assertRaisesRegex(common.ScriptError, "NUL"):
+            sandbox.SandboxMount(guest_target="/workspace", host_path=Path("a\0b"))
         with self.assertRaisesRegex(common.ScriptError, "parent component"):
             sandbox.SandboxMount.parse("/workspace,link/../share")
+
+    def test_mount_parser_accepts_host_paths_with_commas(self):
+        alpha_path = r"C:\projects\alpha,beta"
+        reports_path = r"C:\reports\2026, final"
+        for value, target, host_path, access in (
+            (f"/work,{alpha_path},rw", "/work", alpha_path, "rw"),
+            (f"/reports,{reports_path},ro", "/reports", reports_path, "ro"),
+            # A host path that ends in a comma, or in what looks like a mode,
+            # keeps it before the mode.
+            ("/data,/srv/data,rw,ro", "/data", "/srv/data,rw", "ro"),
+            ("/data,/srv/data,,rw", "/data", "/srv/data,", "rw"),
+            # Values without commas in the host path keep their meaning.
+            ("/data,/srv/data,rw", "/data", "/srv/data", "rw"),
+            ("/data,/srv/data", "/data", "/srv/data", "ro"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    sandbox.parse_mount_value(value), (target, host_path, access)
+                )
+                mount = sandbox.SandboxMount.parse(value, ("secret",))
+                self.assertEqual(mount.host_path, Path(host_path))
+                self.assertEqual(mount.access, access)
+                # OpenVMM finds the end of the host path before the mode, which
+                # NVX therefore always gives.
+                self.assertEqual(
+                    sandbox.mounts_openvmm_arguments((mount,)),
+                    [
+                        "--mount",
+                        f"{target},{os.fspath(Path(host_path))},{access}",
+                        "--mount-deny",
+                        "secret",
+                    ],
+                )
+
+        alpha = sandbox.SandboxMount.parse(f"/work,{alpha_path},rw")
+        reports = sandbox.SandboxMount.parse(f"/reports,{reports_path},ro")
+        arguments = sandbox.mounts_openvmm_arguments((alpha, reports))
+        self.assertEqual(
+            [
+                arguments[index + 1]
+                for index, value in enumerate(arguments)
+                if value == "--mount-child"
+            ],
+            [
+                f"{sandbox.aggregate_child_name(0, '/work')},"
+                f"{os.fspath(Path(alpha_path))},rw",
+                f"{sandbox.aggregate_child_name(1, '/reports')},"
+                f"{os.fspath(Path(reports_path))},ro",
+            ],
+        )
 
     def test_mount_owner_defaults_to_vmm_and_forwards_caller(self):
         default = sandbox.SandboxMount.parse("/workspace,host-dir,rw")
@@ -12461,6 +12515,148 @@ class SandboxTests(unittest.TestCase):
                         )
                     )
 
+    def test_sandbox_command_shares_host_paths_with_commas(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            alpha = root / "alpha,beta"
+            reports = root / "2026, final"
+            layer.write_bytes(b"distro")
+            scratch.write_bytes(b"scratch")
+            for share in (alpha, reports):
+                (share / "secret").mkdir(parents=True)
+
+            def sandbox_args(*mounts: str) -> argparse.Namespace:
+                return nvx.parse_args(
+                    [
+                        "sandbox",
+                        "--layer",
+                        f"distro,{layer},11111111-1111-1111-1111-111111111111",
+                        "--scratch",
+                        str(scratch),
+                        *mounts,
+                        "--dry-run",
+                    ]
+                )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(nvx, "require_file", side_effect=require),
+                patch.object(
+                    nvx, "_format_command", return_value="formatted"
+                ) as format_command,
+            ):
+                nvx.command_sandbox(
+                    sandbox_args(
+                        "--mount", f"/work,{alpha},rw", "--mount-deny", "secret"
+                    )
+                )
+                command = format_command.call_args.args[0]
+                self.assertEqual(
+                    command[command.index("--mount") + 1], f"/work,{alpha},rw"
+                )
+                self.assertEqual(command[command.index("--mount-deny") + 1], "secret")
+
+                nvx.command_sandbox(
+                    sandbox_args(
+                        "--mount",
+                        f"/work,{alpha},rw",
+                        "--mount-deny",
+                        "secret",
+                        "--mount",
+                        f"/reports,{reports},ro",
+                        "--mount-deny",
+                        "secret",
+                    )
+                )
+                command = format_command.call_args.args[0]
+                work, report = (
+                    sandbox.aggregate_child_name(index, target)
+                    for index, target in enumerate(("/work", "/reports"))
+                )
+                self.assertEqual(
+                    [
+                        (value, command[index + 1])
+                        for index, value in enumerate(command)
+                        if value in ("--mount-child", "--mount-deny")
+                    ],
+                    [
+                        ("--mount-child", f"{work},{alpha},rw"),
+                        ("--mount-child", f"{report},{reports},ro"),
+                        ("--mount-deny", os.fspath(alpha / "secret")),
+                        ("--mount-deny", os.fspath(reports / "secret")),
+                    ],
+                )
+                with self.assertRaisesRegex(
+                    common.ScriptError, "end the value with ,ro or ,rw"
+                ):
+                    nvx.command_sandbox(sandbox_args("--mount", f"/work,{alpha}"))
+
+            # A managed sandbox records the host path as given and attaches it
+            # on start.
+            state = root / "state"
+            sandbox_lifecycle.provision(
+                state,
+                sandbox.SandboxLaunch(
+                    layers=(
+                        sandbox.SandboxLayer(
+                            role="distro",
+                            path=layer,
+                            uuid="11111111-1111-1111-1111-111111111111",
+                        ),
+                    ),
+                    scratch=scratch,
+                    mounts=(
+                        sandbox.SandboxMount.parse(
+                            f"/reports,{reports},ro", ("secret",)
+                        ),
+                    ),
+                ),
+                hypervisor="whp",
+                memory_mib=256,
+                net=None,
+                network_profile=None,
+                network_egress=None,
+                network_ingress=None,
+                network_egress_allow=(),
+                network_egress_deny=(),
+                host_loopback=None,
+                network_proxy=None,
+                host_loopback_forward=(),
+                cmdline="quiet",
+                timeout=10,
+            )
+            config = json.loads(
+                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(config["mount"]["host_path"], os.fspath(reports))
+            process = MagicMock()
+            process.pid = 123
+            process.stdin = io.BytesIO()
+            with (
+                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
+                patch.object(
+                    sandbox_lifecycle.subprocess, "Popen", return_value=process
+                ) as popen,
+                patch.object(
+                    sandbox_lifecycle, "_process_start_time", return_value=456
+                ),
+                patch.object(
+                    sandbox_lifecycle.ControlSession,
+                    "connect",
+                    return_value=MagicMock(),
+                ),
+            ):
+                sandbox_lifecycle.start(state, 10)
+            command = popen.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--mount") + 1], f"/reports,{reports},ro"
+            )
+            self.assertEqual(command[command.index("--mount-deny") + 1], "secret")
+
     def test_run_attaches_a_file_as_an_aggregate_child(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -12975,6 +13171,92 @@ class SandboxTests(unittest.TestCase):
                 nvx.command_sandbox(three)
             command = format_command.call_args.args[0]
             self.assertEqual(command.count("--mount-child"), 3)
+
+    def test_run_shares_host_paths_with_commas(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            alpha = root / "alpha,beta"
+            reports = root / "2026, final"
+            settings = root / "settings,v2.json"
+            alpha.mkdir()
+            reports.mkdir()
+            settings.write_bytes(b"{}")
+            with (
+                patch.object(nvx, "require_file", return_value=Path("artifact")),
+                patch.object(
+                    nvx, "_format_command", return_value="formatted"
+                ) as format_command,
+            ):
+                # The mode follows the last comma, so a lone directory stays a
+                # plain --mount of its exact path, and OpenVMM gets the mode
+                # even when the value omits it.
+                for value, expected in (
+                    (f"/work,{alpha},rw", f"/work,{alpha},rw"),
+                    (f"/reports,{reports},ro", f"/reports,{reports},ro"),
+                    (f"/plain,{root}", f"/plain,{root},ro"),
+                ):
+                    with self.subTest(value=value):
+                        nvx.command_run(
+                            nvx.parse_args(["run", "--mount", value, "--dry-run"])
+                        )
+                        command = format_command.call_args.args[0]
+                        self.assertNotIn("--mount-aggregate", command)
+                        self.assertEqual(
+                            command[command.index("--mount") + 1], expected
+                        )
+
+                # Several shares are the children of an aggregate, whose values
+                # end in the mode and, for a file, the `file` flag.
+                nvx.command_run(
+                    nvx.parse_args(
+                        [
+                            "run",
+                            "--mount",
+                            f"/work,{alpha},rw",
+                            "--mount",
+                            f"/reports,{reports},ro",
+                            "--mount",
+                            f"/config/settings.json,{settings},ro",
+                            "--mount-deny",
+                            str(alpha / "secret"),
+                            "--dry-run",
+                        ]
+                    )
+                )
+                command = format_command.call_args.args[0]
+                work, report, config = (
+                    sandbox.aggregate_child_name(index, target)
+                    for index, target in enumerate(
+                        ("/work", "/reports", "/config/settings.json")
+                    )
+                )
+                self.assertEqual(
+                    [
+                        command[index + 1]
+                        for index, value in enumerate(command)
+                        if value == "--mount-child"
+                    ],
+                    [
+                        f"{work},{alpha},rw",
+                        f"{report},{reports},ro",
+                        f"{config},{settings},ro,file",
+                    ],
+                )
+                self.assertEqual(
+                    command[command.index("--mount-deny") + 1], str(alpha / "secret")
+                )
+
+                # Without the mode, the text after the last comma is no mode.
+                for value in (f"/work,{alpha}", f"/reports,{reports}"):
+                    with (
+                        self.subTest(value=value),
+                        self.assertRaisesRegex(
+                            common.ScriptError, "end the value with ,ro or ,rw"
+                        ),
+                    ):
+                        nvx.command_run(
+                            nvx.parse_args(["run", "--mount", value, "--dry-run"])
+                        )
 
     def test_run_attaches_several_mounts_as_an_aggregate(self):
         args = nvx.parse_args(

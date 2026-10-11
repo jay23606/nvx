@@ -64,8 +64,9 @@ python scripts\nvx.py run --hypervisor whp `
     --mount "/mnt/host,C:\Users\me\microvm-share,rw"
 ```
 
-For `--mount`, the guest target must be an absolute Linux path. Host paths containing
-commas are unsupported. Use `ro` unless guest writes are required.
+For `--mount`, the guest target must be an absolute Linux path. The mode follows
+the last comma, so a host path may contain commas when the mode is given. Use
+`ro` unless guest writes are required.
 
 ## 3. Check for Conflicts
 

@@ -77,6 +77,30 @@ def parse_workload_identity(value: str) -> tuple[int, int]:
     return uid, gid
 
 
+def parse_mount_value(value: str) -> tuple[str, str, str]:
+    """Split a --mount value, GUEST_TARGET,HOST_PATH[,ro|rw], into its guest
+    target, host path, and access mode, which defaults to ro.
+
+    The guest target ends at the first comma, and with another comma, the
+    mode follows the last one, so a host path may contain commas when the mode
+    is given. OpenVMM reads its --mount and --mount-child values the same way.
+    """
+    target, separator, rest = value.partition(",")
+    if not separator:
+        raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
+    host_path, separator, access = rest.rpartition(",")
+    if not separator:
+        host_path, access = rest, "ro"
+    if not host_path:
+        raise ScriptError("--mount host path is empty")
+    if access not in MOUNT_ACCESS_MODES:
+        raise ScriptError(
+            f"unsupported --mount mode {access!r}; choose ro or rw (if HOST_PATH "
+            "contains commas, end the value with ,ro or ,rw)"
+        )
+    return target, host_path, access
+
+
 @dataclass(frozen=True)
 class SandboxLayer:
     role: str
@@ -166,13 +190,7 @@ class SandboxMount:
         writable_paths: tuple[str, ...] = (),
         kind: str = "directory",
     ) -> SandboxMount:
-        fields = value.split(",")
-        if len(fields) not in (2, 3):
-            raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
-        guest_target, raw_path = fields[:2]
-        if not raw_path:
-            raise ScriptError("sandbox mount host path is empty")
-        access = fields[2] if len(fields) == 3 else "ro"
+        guest_target, raw_path, access = parse_mount_value(value)
         return cls(
             guest_target=guest_target,
             host_path=Path(raw_path),
@@ -200,9 +218,9 @@ class SandboxMount:
                 "or file"
             )
         raw_path = os.fspath(self.host_path)
-        if any(character in raw_path for character in ",\0"):
+        if "\0" in raw_path:
             raise ScriptError(
-                f"sandbox mount host paths containing commas are unsupported: {raw_path}"
+                f"sandbox mount host path contains a NUL character: {raw_path!r}"
             )
         if ".." in self.host_path.parts:
             raise ScriptError(
@@ -402,9 +420,18 @@ def aggregate_child_name(index: int, target: str) -> str:
 
 def aggregate_child_argument(name: str, host_path: str, access: str, kind: str) -> str:
     """Return the `--mount-child` value that attaches `host_path` as the child
-    `name`. A file child carries OpenVMM's `file` flag, so OpenVMM refuses a
-    directory that replaced the file instead of exporting all of it."""
+    `name`. It always gives the mode, which OpenVMM reads after the last comma
+    or before the `file` flag, so the host path may contain commas. A file
+    child carries OpenVMM's `file` flag, so OpenVMM refuses a directory that
+    replaced the file instead of exporting all of it."""
     return f"{name},{host_path},{access}" + (",file" if kind == "file" else "")
+
+
+def mount_argument(target: str, host_path: str, access: str) -> str:
+    """Return the `--mount` value that attaches `host_path` at `target`. It
+    always gives the mode, which OpenVMM reads after the last comma, so the
+    host path may contain commas."""
+    return f"{target},{host_path},{access}"
 
 
 def mounts_openvmm_arguments(mounts: tuple[SandboxMount, ...]) -> list[str]:
@@ -418,7 +445,9 @@ def mounts_openvmm_arguments(mounts: tuple[SandboxMount, ...]) -> list[str]:
         arguments.extend(
             (
                 "--mount",
-                f"{mount.guest_target},{os.fspath(mount.host_path)},{mount.access}",
+                mount_argument(
+                    mount.guest_target, os.fspath(mount.host_path), mount.access
+                ),
             )
         )
     elif mounts:
