@@ -96,6 +96,7 @@ MICROVM_TEST_SCENARIOS = (
     "directional-network-policy",
     "denied-filesystem-paths",
     "endpoint-policy-snapshot",
+    "filesystem-comma-paths",
     "filesystem-owner",
     "filesystem-policy",
     "filesystem-shares",
@@ -240,6 +241,7 @@ FILESYSTEM_SHARES_AFTER_MARKER = b"NVX-FILESYSTEM-SHARES-AFTER"
 FILESYSTEM_POLICY_MARKER = b"NVX-FILESYSTEM-POLICY-OK"
 FILESYSTEM_POLICY_BEFORE_MARKER = b"NVX-FILESYSTEM-POLICY-BEFORE"
 FILESYSTEM_POLICY_AFTER_MARKER = b"NVX-FILESYSTEM-POLICY-AFTER"
+FILESYSTEM_COMMA_PATHS_MARKER = b"NVX-FILESYSTEM-COMMA-PATHS-OK"
 NETWORK_BEFORE_MARKER = b"NVX-NETWORK-BEFORE"
 NETWORK_INVALIDATED_MARKER = b"NVX-NETWORK-OLD-FLOW-INVALIDATED"
 NETWORK_AFTER_MARKER = b"NVX-NETWORK-AFTER"
@@ -6078,6 +6080,83 @@ def run_filesystem_policy(
             )
 
 
+def run_filesystem_comma_paths(
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+    guest: str = "alpine",
+) -> None:
+    """Share host directories whose paths contain commas through `nvx.py run`:
+    a read-write `alpha,beta` and a read-only `2026, final`, each with a
+    denied subdirectory, first each alone, as OpenVMM's `--mount`, and then
+    both, as the children of an aggregate. The guest must find each exact
+    directory, rather than the one beside it that the text before the last
+    comma of its path names, with its mode, which OpenVMM enforces, and
+    without its denied subdirectory."""
+    with tempfile.TemporaryDirectory(prefix="nvx-comma-paths-") as temporary:
+        root = Path(temporary)
+        alpha = root / "projects" / "alpha,beta"
+        reports = root / "reports" / "2026, final"
+        shares = {
+            alpha: ("/mnt/alpha", "rw", "NVX-ALPHA-BETA"),
+            reports: ("/mnt/reports", "ro", "NVX-REPORTS"),
+        }
+        for share, (_, _, seed) in shares.items():
+            (share / "secret").mkdir(parents=True)
+            (share / "seed").write_bytes(seed.encode())
+            (share / "secret" / "token").write_bytes(b"NVX-SECRET")
+            decoy = share.with_name(share.name.rsplit(",", 1)[0])
+            decoy.mkdir()
+            (decoy / "seed").write_bytes(b"NVX-DECOY")
+        contents = _tree_contents(root)
+        for name, attached in (
+            ("alpha", (alpha,)),
+            ("reports", (reports,)),
+            ("aggregate", (alpha, reports)),
+        ):
+            command = [
+                sys.executable,
+                str(Path(__file__).parents[1] / "nvx.py"),
+                "run",
+                "--guest",
+                guest,
+                "--hypervisor",
+                backend,
+                "--memory-mib",
+                str(memory_mib),
+                "--cmdline",
+                "quiet loglevel=0",
+            ]
+            for share in attached:
+                target, mode, _ = shares[share]
+                command.extend(("--mount", f"{target},{share},{mode}"))
+            for share in attached:
+                command.extend(("--mount-deny", str(share / "secret")))
+            run_guest_script(
+                command,
+                _render_script(
+                    "filesystem-comma-paths.sh.in",
+                    AGGREGATE="1" if len(attached) > 1 else "0",
+                    SHARES=" ".join(":".join(shares[share]) for share in attached),
+                ),
+                FILESYSTEM_COMMA_PATHS_MARKER,
+                timeout=timeout,
+                log_path=output_dir / f"filesystem-comma-paths-{name}.log",
+                contain_process_tree=True,
+            )
+            expected = dict(contents)
+            if alpha in attached:
+                expected["projects/alpha,beta/from-guest"] = b"NVX-GUEST-WRITE\n"
+            if _tree_contents(root) != expected:
+                raise RuntimeError(
+                    f"the {name} shares of host paths with commas changed more "
+                    "than the read-write directory's guest write"
+                )
+            (alpha / "from-guest").unlink(missing_ok=True)
+
+
 def _expect_boot_failure(
     command: list[str], log_path: Path, timeout: float, expected: bytes
 ) -> None:
@@ -6953,6 +7032,18 @@ def run(args: argparse.Namespace) -> int:
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+        )
+    if "filesystem-comma-paths" in scenarios:
+        print(
+            "Running public nvx.py shares of host paths with commas "
+            f"on OpenVMM/{args.backend}"
+        )
+        run_filesystem_comma_paths(
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            guest=descriptor.name,
         )
     if "filesystem-snapshot" in scenarios:
         print(

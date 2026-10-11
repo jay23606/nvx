@@ -111,6 +111,13 @@ except an allowed child, inside which a denied grandchild stays hidden, and
 verifies that the denied directory lists and exposes only the allowed child.
 It rejects invalid policies before boot and round-trips the policy through a
 snapshot whose restore requires the same policy and keeps a writable handle.
+Comma-path coverage shares a read-write `alpha,beta` and a read-only
+`2026, final` directory through `nvx.py run`, each alone, as OpenVMM's
+`--mount`, and both, as the children of an aggregate. It verifies that each
+target shows its exact directory rather than the one beside it that the text
+before the last comma names, that each denied subdirectory stays hidden, and
+that OpenVMM refuses writes to the read-only directory with `EROFS` even after
+guest root remounts it read-write.
 The native suite targets KVM, MSHV, and WHP; a passing run on one backend is
 not a fresh result for the others.
 Coverage also includes

@@ -2465,6 +2465,119 @@ class FilesystemPolicyScenarioTests(unittest.TestCase):
             self.assertIn("nvx-exit 0", script)
 
 
+class FilesystemCommaPathsScenarioTests(unittest.TestCase):
+    """The filesystem-comma-paths scenario with `nvx.py run` and the guest
+    simulated."""
+
+    @staticmethod
+    def _values(command: list[str], option: str) -> list[str]:
+        return [
+            command[index + 1] for index, value in enumerate(command) if value == option
+        ]
+
+    def _run(
+        self,
+        *,
+        guest_writes_read_only: bool = False,
+        guest_skips_write: bool = False,
+    ) -> list[tuple[list[str], str]]:
+        launched: list[tuple[list[str], str]] = []
+
+        def guest(
+            command: list[str], script: str, marker: bytes, **kwargs: object
+        ) -> None:
+            launched.append((list(command), script))
+            self.assertEqual(marker, microvm_tests.FILESYSTEM_COMMA_PATHS_MARKER)
+            self.assertIs(kwargs["contain_process_tree"], True)
+            for mount in self._values(command, "--mount"):
+                # NVX and OpenVMM read the mode after the last comma.
+                host, mode = mount.split(",", 1)[1].rsplit(",", 1)
+                if mode == "rw" and not guest_skips_write:
+                    (Path(host) / "from-guest").write_bytes(b"NVX-GUEST-WRITE\n")
+                if mode == "ro" and guest_writes_read_only:
+                    (Path(host) / "from-guest").write_bytes(b"")
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(microvm_tests, "run_guest_script", side_effect=guest),
+        ):
+            microvm_tests.run_filesystem_comma_paths(
+                "kvm", memory_mib=128, timeout=1.0, output_dir=Path(temporary)
+            )
+        return launched
+
+    def test_scenario_shares_each_directory_alone_and_both_together(self):
+        launched = self._run()
+        self.assertEqual(len(launched), 3)
+        alpha = ("/mnt/alpha", "projects", "alpha,beta", "rw", "NVX-ALPHA-BETA")
+        reports = ("/mnt/reports", "reports", "2026, final", "ro", "NVX-REPORTS")
+        for (command, script), shares in zip(
+            launched, ((alpha,), (reports,), (alpha, reports)), strict=True
+        ):
+            self.assertEqual(command[0], sys.executable)
+            self.assertEqual(Path(command[1]).name, "nvx.py")
+            self.assertEqual(command[2], "run")
+            self.assertEqual(command[command.index("--hypervisor") + 1], "kvm")
+            mounts = self._values(command, "--mount")
+            denied = self._values(command, "--mount-deny")
+            self.assertEqual(len(mounts), len(shares))
+            for mount, deny, (target, parent, name, mode, seed) in zip(
+                mounts, denied, shares, strict=True
+            ):
+                # Each value names the exact directory and ends in its mode,
+                # beside the directory that the text before the last comma
+                # names.
+                self.assertTrue(mount.startswith(f"{target},"), mount)
+                self.assertTrue(mount.endswith(f",{mode}"), mount)
+                host = Path(mount[len(target) + 1 : -len(mode) - 1])
+                self.assertEqual((host.parent.name, host.name), (parent, name))
+                self.assertEqual(Path(deny), host / "secret")
+                self.assertIn(f"{target}:{mode}:{seed}", script)
+            self.assertIn(f"\naggregate={int(len(shares) > 1)}\n", script)
+            self.assertNotIn("@", script)
+
+    def test_scenario_rejects_a_write_to_the_read_only_directory(self):
+        with self.assertRaisesRegex(RuntimeError, "changed more than"):
+            self._run(guest_writes_read_only=True)
+
+    def test_scenario_requires_the_write_to_the_read_write_directory(self):
+        with self.assertRaisesRegex(RuntimeError, "changed more than"):
+            self._run(guest_skips_write=True)
+
+    def test_runner_dispatches_the_scenario_with_the_guest(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(microvm_tests, "validate_openvmm_test_backend"),
+            patch.object(microvm_tests, "require_file", side_effect=require),
+            patch.object(microvm_tests, "run_filesystem_comma_paths") as scenario,
+        ):
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--scenario",
+                    "filesystem-comma-paths",
+                    "--output-dir",
+                    temporary,
+                ]
+            )
+            self.assertEqual(microvm_tests.run(args), 0)
+            scenario.assert_called_once_with(
+                "whp",
+                memory_mib=128,
+                timeout=60.0,
+                output_dir=Path(temporary),
+                guest="alpine",
+            )
+        self.assertIn("filesystem-comma-paths", microvm_tests.MICROVM_TEST_SCENARIOS)
+        script = microvm_tests._read_script("filesystem-comma-paths.sh.in")
+        self.assertIn("nvx-exit 0", script)
+
+
 class ControlSessionTests(unittest.TestCase):
     def test_named_pipe_connect_retries_transient_invalid_argument(self):
         error = OSError(control_session.errno.EINVAL, "Invalid argument")
