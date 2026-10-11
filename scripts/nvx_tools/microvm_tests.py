@@ -1839,29 +1839,6 @@ def run_directional_network_policy(
         else:
             unexpected.close()
             raise RuntimeError("deny-all egress reached the host TCP listener")
-
-        unsupported_command = _directional_network_command(
-            executable,
-            kernel,
-            initrd,
-            backend,
-            memory_mib,
-            egress="allow",
-            ingress="allow",
-        )
-        with OpenvmmProcess(
-            unsupported_command,
-            output_dir / "directional-network-unsupported-ingress.log",
-        ) as process:
-            unsupported = process.wait(timeout)
-        if (
-            unsupported.returncode == 0
-            or b"--network-ingress allow is unsupported" not in unsupported.output
-            or BOOT_MARKER in unsupported.output
-        ):
-            raise RuntimeError(
-                "unsupported ingress policy was not rejected before boot"
-            )
     finally:
         listener.close()
         server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)

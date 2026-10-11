@@ -36,8 +36,8 @@ entropy reseed, active console RX/TX, network policy and HTTP traffic, and live
 virtio-fs attachment revalidation, including a guest-created symbolic link held
 across capture. Directional network coverage verifies an
 egress request and response with ingress denied, denial of a host connection
-to an active guest listener, complete egress denial, and pre-boot rejection of
-unsupported ingress on KVM, MSHV, and WHP. L3/L4 coverage verifies TCP and UDP
+to an active guest listener, and complete egress denial on KVM, MSHV, and WHP.
+L3/L4 coverage verifies TCP and UDP
 port rules, overlapping deny precedence, default-deny behavior, and pre-boot
 rejection of malformed or incomplete rules. Protocol coverage verifies that
 TCP, UDP, and ICMP rules without a port, `any` with a port, and `any` alone

@@ -99,8 +99,8 @@ tokens. A fresh boot then appends host-owned tokens in this order:
    slot, boot console, sandbox blocks, and the control console
    followed by `nvx_control_tty=hvc2`; and
 5. network bootstrap tokens, including gateway DNS only when the egress
-   policy permits it, which names the IPv4 gateway or else the IPv6 one,
-   followed by
+   policy permits it, which names the IPv4 gateway or else the IPv6 one, and
+   `virtnet_ingress=allow` last when ingress is allowed, followed by
    [filesystem bootstrap tokens](machine-and-device-abi.md#filesystem) for
    the attached HostFs export or aggregate.
 
@@ -111,7 +111,7 @@ fails with `E_CMDLINE_CLOCK_TOKEN`.
 
 Callers may not supply `earlycon=`, `console=`, `virtio_mmio.device=`,
 `virtnet_ip=`, `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`, `virtnet_ip6=`,
-`virtnet_gw6=`, `virtfs_dir=`, `virtfs_tag=`, `virtfs_mode=`,
+`virtnet_gw6=`, `virtnet_ingress=`, `virtfs_dir=`, `virtfs_tag=`, `virtfs_mode=`,
 `virtfs_aggregate=`, `nvx_snapshot_tier=`, `nr_cpus=`, `nvx_workload_uid=`,
 `nvx_workload_gid=`, or `nvx_lifecycle=` tokens. A machine with a control
 console also applies the

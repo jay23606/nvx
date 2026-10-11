@@ -356,10 +356,11 @@ requests, and flow objects are never serialized.
 
 By default, and subject to the egress policy, the gateway maps guest TCP and
 UDP flows onto host loopback. The portable NAT cannot offer generic
-bidirectional host-loopback connectivity, so an explicit host-loopback allow is
-accepted only with explicit localhost TCP or UDP port forwards into the guest,
-at most 64 of them. Forwards are process-local attachments, and snapshot
-capture and restore reject them. Host-loopback deny blocks gateway and
+bidirectional host-loopback connectivity on its own, so an explicit
+host-loopback allow is accepted only with explicit localhost TCP or UDP port
+forwards into the guest, at most 64 of them, or with private-network ingress.
+Forwards are process-local attachments, and snapshot capture and restore
+reject them. Host-loopback deny blocks gateway and
 host-local destinations and every forward. One exact gateway TCP proxy endpoint
 may remain available under deny and is bound into the policy digest.
 Capture quiesces the endpoint, drains completion ownership, and requires the
@@ -368,6 +369,34 @@ queue lifecycle, negotiated features, link state, and endpoint generation.
 Arbitrary in-flight packet payloads are not serialized. Pre-capture queued
 packets are not replayed, old TCP/UDP/ICMP/DNS state is invalidated, and new
 traffic must establish fresh post-restore flows.
+
+Ingress `allow` publishes the guest's listeners to the host's private
+networks. OpenVMM then appends the `virtnet_ingress=allow` token, which callers
+may not supply, after the other network tokens, and the guest announces its
+listeners in UDP datagrams to port 1021 of the IPv4 gateway from a source port
+below 1024. An announcement is the magic `NVXL`, version 1, a flags byte whose
+bit 0 marks omitted listeners, a big-endian 16-bit count of at most 64, and
+that many four-byte entries in strictly increasing order of protocol and port:
+the IP protocol number, 6 for TCP or 17 for UDP, a family mask with 1 for IPv4
+and 2 for IPv6, and the big-endian nonzero port. The endpoint consumes
+announcements before the egress policy, which neither authorizes nor forwards
+them, and each one replaces the published set. For each published port and
+family, the endpoint listens on that port of every host address and relays
+only peers in the IPv4 private-use, shared, link-local, benchmarking, and
+documentation ranges or the IPv6 unique local, site-local, documentation, and
+benchmarking ranges, none of which is globally reachable, except peers inside
+the guest's own subnets, which the guest would take for its gateway or its
+neighbors. Peers at the host's own addresses, including loopback, need an
+explicit host-loopback allow. Under ingress allow, the policy also admits ARP
+requests and Neighbor Solicitations for the guest's subnet and Neighbor
+Solicitations for the link-local addresses at which the gateway presents host
+peers. It admits a frame that its rules deny when the frame continues a flow
+that the endpoint carries: a TCP segment other than an initial SYN, or a UDP
+datagram from a published port to a peer that recently sent one to it, which
+leaves through the port's host listener. Ingress allow selects canonical
+policy encoding version 5, which adds the ingress action, and leaves the
+encoding and digest of ingress-deny policies unchanged. Snapshot capture and
+restore reject it, and the TAP backend rejects ingress-allow policies.
 
 ### Filesystem
 

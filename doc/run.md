@@ -121,8 +121,9 @@ Direct OpenVMM launches accept generic directional network defaults:
 
 Egress defaults to `allow` and ingress defaults to `deny`. With ingress denied,
 responses to guest-initiated connections remain available, while new inbound
-connections do not. The portable profile supports egress `allow` or `deny` but
-rejects ingress `allow` before the workload starts.
+connections do not. With ingress `allow`, clients on the host's private
+networks reach the guest's listeners, as described in
+[Private-network ingress](#private-network-ingress).
 
 The NIC is dual-stack. The guest's IPv6 address embeds its IPv4 address in the
 unique local prefix `fd00::/96`, with a prefix of 96 plus the IPv4 prefix, and
@@ -333,10 +334,11 @@ same port and other host service ports remain blocked even with ordinary
 egress allowed.
 
 The portable profile does **not** support generic bidirectional host-loopback
-allow. Explicit `--host-loopback allow` without any forward is rejected before
-VM resources are opened. For deliberate port publishing, repeat
-`--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form to expose
-only selected localhost ports toward the guest, with explicit
+allow on its own. Explicit `--host-loopback allow` without any forward is
+rejected before VM resources are opened unless ingress is `allow`, which then
+also admits the host to the guest's listeners. For deliberate port publishing,
+repeat `--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form to
+expose only selected localhost ports toward the guest, with explicit
 `--host-loopback allow`. These forwards do not satisfy a generic allow policy
 that provides no port list. Omitting `--host-loopback` preserves existing
 guest-to-host mapping without publishing guest ports. Guest-originated traffic
@@ -376,6 +378,59 @@ example:
   --restore-memory 1024M \
   --restore-ready-path /run/nvx/restore-ready.sock
 ```
+
+### Private-network ingress
+
+Ingress `allow` lets clients on the host's private networks reach every TCP
+and UDP port on which the guest listens, without a port list:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --hypervisor kvm \
+  --memory 128M \
+  --kernel guest/vmlinux \
+  --initrd guest/initramfs.cpio.gz \
+  --net 10.0.0.2/24 \
+  --network-profile portable \
+  --network-egress deny \
+  --network-ingress allow
+```
+
+OpenVMM appends `virtnet_ingress=allow` to the kernel command line, and the
+guest's init then starts `nvx-ingress`, which reports the guest's listening
+TCP sockets and its unconnected UDP sockets to the gateway, except those bound
+to a loopback address or an IPv6 link-local one. It reports a change within
+100 milliseconds, or about a second for a new UDP socket, and repeats the
+report every 2 seconds. Only guest root can send the report, from a privileged
+port, and the egress policy does not apply to it. For each reported port,
+OpenVMM listens on the same port of every host address, of each family on which
+the guest listens, and relays connections and datagrams to the guest.
+
+OpenVMM admits a client only when its address is not globally reachable, such
+as one in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
+`169.254.0.0/16`, or `fc00::/7`. It resets the TCP connections and drops the
+UDP datagrams of other clients, so internet clients never reach the guest. It
+also refuses clients that the guest could not answer: those inside the guest's
+own networks, such as `10.0.0.0/24` and `fd00::a00:0/120` for `10.0.0.2/24`,
+which the guest would take for its gateway or its neighbors, and IPv6
+link-local clients, so choose a guest network that contains no client. The
+host itself, at a loopback address or one of its own, counts as host loopback:
+OpenVMM admits it only with explicit `--host-loopback allow`. Replies to
+admitted clients pass whatever the egress policy, while the guest's own
+connections remain subject to it.
+
+Publication is best effort. OpenVMM cannot publish a port that a host process
+holds, or on Linux a privileged port that it may not bind; it logs a warning
+and retries with the next report. An explicit `--host-loopback-forward` to the
+same guest port keeps working beside the publication. The guest reports at
+most 64 ports. A TCP socket listening on `::` counts for IPv4 too unless it is
+IPv6-only, and a UDP socket on `::` unless the guest sets
+`net.ipv6.bindv6only`. Clients on other hosts also need the host's firewall to
+admit them to OpenVMM, for example an inbound rule for `openvmm.exe` on
+Windows. Snapshot capture and restore reject ingress `allow`, because the
+published listeners are live host attachments.
 
 ## Migration from the retired profile
 

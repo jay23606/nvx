@@ -512,11 +512,11 @@ python3 scripts/nvx.py run
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. The guest also gets the IPv6 address that embeds it in `fd00::/96`, such as `fd00::a00:2/120` for `10.0.0.2/24`. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--network-egress {allow,deny}` | `allow` | Set the default guest egress policy. |
-| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. The portable profile currently supports only `deny`; `allow` is rejected before launch. |
+| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). Snapshot capture and restore reject `allow`. |
 | `--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Allow matching guest egress; repeat to add rules. `CIDR` is an IPv4 or IPv6 address or network, and a rule matches only its own family. `PROTOCOL` is `tcp`, `udp`, or `icmp` and matches every port when `PORT` is omitted; only `tcp` and `udp` take a `PORT` or an inclusive `PORT-PORT` range, such as `8000-8010`. |
 | `--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Deny matching guest egress; repeat to add rules. Deny rules take precedence. `PROTOCOL` and `PORT` select traffic as for `--network-egress-allow`. |
 | `--network-egress-policy-file PATH` | none | Load bounded IPv4 and IPv6 ranges and rule-local CIDR exclusions from JSON. Requires explicit `--network-egress`; cannot be mixed with explicit allow/deny rule flags. |
-| `--host-loopback {allow,deny}` | existing mapping | Control guest access to host loopback services. |
+| `--host-loopback {allow,deny}` | existing mapping | Control guest access to host loopback services. Explicit `allow` requires `--host-loopback-forward` or `--network-ingress allow`, whose published ports it then also opens to the host. |
 | `--network-proxy IPV4:TCP-PORT` | none | Allow one explicit host TCP proxy endpoint. |
 | `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. |
 | `--outcome-report PATH` | none | Write a bounded local JSON outcome report. |
@@ -620,11 +620,11 @@ launches.
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. The guest also gets the IPv6 address that embeds it in `fd00::/96`. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--network-egress {allow,deny}` | `allow` | Set the default guest egress policy for `run` or `provision`. |
-| `--network-ingress {allow,deny}` | `deny` | Set the host ingress policy for `run` or `provision`. The portable profile supports only `deny`. |
+| `--network-ingress {allow,deny}` | `deny` | Set the host ingress policy for `run` or `provision`. `allow` publishes every TCP and UDP port on which the workload listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). |
 | `--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Allow matching guest egress; repeat to add rules. Requires explicit `--network-egress`. `CIDR` is an IPv4 or IPv6 address or network, and a rule matches only its own family. `PROTOCOL` is `tcp`, `udp`, or `icmp` and matches every port when `PORT` is omitted; only `tcp` and `udp` take a `PORT` or an inclusive `PORT-PORT` range, such as `8000-8010`. |
 | `--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Deny matching guest egress; repeat to add rules. Requires explicit `--network-egress`; deny rules take precedence. `PROTOCOL` and `PORT` select traffic as for `--network-egress-allow`. |
 | `--network-egress-policy-file PATH` | none | Load bounded IPv4 and IPv6 ranges and rule-local CIDR exclusions for `run` or `provision`. Managed provision persists lowered rules, not this path. Requires explicit `--network-egress`; cannot be mixed with explicit allow/deny rule flags. |
-| `--host-loopback {allow,deny}` | existing mapping | Control guest access to host loopback services for `run` or `provision`. |
+| `--host-loopback {allow,deny}` | existing mapping | Control guest access to host loopback services for `run` or `provision`. Explicit `allow` requires `--host-loopback-forward` or `--network-ingress allow`, whose published ports it then also opens to the host. |
 | `--network-proxy IPV4:TCP-PORT` | none | Allow one explicit host TCP proxy endpoint; the IPv4 address must match the guest gateway. |
 | `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards and set `--host-loopback allow`. |
 | `--outcome-report PATH` | none | Write a bounded local JSON outcome report for one-shot `run` or managed `exec`. |
