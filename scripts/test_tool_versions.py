@@ -1097,8 +1097,18 @@ class RunnerSetupTests(unittest.TestCase):
             + 'expected_runner_labels="linux,kvm,virtual-machine"\n'
             + 'append_runner_labels "$1"\n'
         )
-        for labels in ("", "linux", "KVM", "pool,POOL", "pool,pool", ",pool",
-                       "pool,", "pool,,fast", "bad label", "bad/label"):
+        for labels in (
+            "",
+            "linux",
+            "KVM",
+            "pool,POOL",
+            "pool,pool",
+            ",pool",
+            "pool,",
+            "pool,,fast",
+            "bad label",
+            "bad/label",
+        ):
             with self.subTest(labels=labels):
                 result = subprocess.run(
                     [*shells[0], "-c", script, "labels", labels],
