@@ -104,6 +104,7 @@ mod protocol;
 mod session;
 mod state;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -131,9 +132,10 @@ use crate::error::{Error, Result};
 use crate::exec::{Completion, ExecFailure, ExecOutcome};
 use crate::id::SandboxId;
 use crate::model::{
-    Command, DeprovisionResult, ExecRequest, Metadata, ProcessSpec, ProvisionRequest,
+    Access, Command, DeprovisionResult, ExecRequest, Metadata, ProcessSpec, ProvisionRequest,
     ProvisionResult, StartResult, StopResult, duration_millis,
 };
+use crate::spec::SandboxSpec;
 
 /// Shell that interprets `process.commandLine`.
 const SHELL: &str = "/bin/sh";
@@ -461,8 +463,10 @@ impl Backend for OpenVmmBackend {
         capabilities.network.egress_allow = true;
         capabilities.network.egress_deny = true;
         capabilities.network.ingress_deny = true;
+        capabilities.network.host_loopback_allow = true;
         capabilities.network.host_loopback_deny = true;
         capabilities.network.egress_rules = true;
+        capabilities.spec.host_loopback_forwards = true;
         capabilities.filesystem.readonly_paths = true;
         capabilities.filesystem.readwrite_paths = true;
         capabilities.filesystem.denied_paths = true;
@@ -510,12 +514,65 @@ impl Backend for OpenVmmBackend {
         Ok(())
     }
 
+    fn validate_provision_with(
+        &self,
+        request: &ProvisionRequest,
+        spec: &SandboxSpec,
+    ) -> Result<()> {
+        self.validate_provision(request)?;
+        if spec.host_loopback_forwards.len() > 64 {
+            return Err(Error::policy_validation(
+                "the openvmm backend accepts at most 64 host-loopback forwards",
+            ));
+        }
+        let mut bindings = HashSet::new();
+        for forward in &spec.host_loopback_forwards {
+            if !bindings.insert((forward.protocol, forward.host_port)) {
+                return Err(Error::policy_validation(
+                    "spec.hostLoopbackForwards cannot bind one protocol and host port more than once",
+                ));
+            }
+        }
+        if !spec.host_loopback_forwards.is_empty() {
+            let network = request.network.as_ref().ok_or_else(|| {
+                Error::policy_validation(
+                    "spec.hostLoopbackForwards require network.ingress.hostLoopback: allow",
+                )
+            })?;
+            if network.ingress.host_loopback != Some(Access::Allow) {
+                return Err(Error::policy_validation(
+                    "spec.hostLoopbackForwards require network.ingress.hostLoopback: allow",
+                ));
+            }
+            if network.egress.default != Access::Allow {
+                return Err(Error::policy_validation(
+                    "spec.hostLoopbackForwards require network.egress.default: allow for replies",
+                ));
+            }
+            if network::deny_rules_overlap_guest_network(network, &self.config.guest_network)? {
+                return Err(Error::policy_validation(
+                    "network.egress.deny cannot cover the guest network used for host-loopback \
+                     forward replies",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_exec(&self, request: &ExecRequest) -> Result<()> {
         prepare_exec(&request.process).map(|_| ())
     }
 
     fn provision(&self, request: &ProvisionRequest) -> Result<ProvisionResult> {
-        self.validate_provision(request)?;
+        self.provision_with(request, &SandboxSpec::new())
+    }
+
+    fn provision_with(
+        &self,
+        request: &ProvisionRequest,
+        spec: &SandboxSpec,
+    ) -> Result<ProvisionResult> {
+        self.validate_provision_with(request, spec)?;
         self.probe()?;
         let memory_mib = request
             .microvm
@@ -536,6 +593,7 @@ impl Backend for OpenVmmBackend {
             backend: BACKEND_KEY.to_owned(),
             network: request.network.clone(),
             filesystem,
+            host_loopback_forwards: spec.host_loopback_forwards.clone(),
             memory_mib,
             workload_uid,
             workload_gid,

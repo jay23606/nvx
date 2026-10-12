@@ -203,6 +203,7 @@ HOST_LOOPBACK_UDP_CONTROL_MARKER = b"NVX-HOST-LOOPBACK-UDP-CONTROL-OK"
 HOST_LOOPBACK_ALLOW_MARKER = b"NVX-HOST-LOOPBACK-ALLOW-OK"
 HOST_LOOPBACK_INGRESS_READY_MARKER = b"NVX-HOST-LOOPBACK-INGRESS-READY"
 HOST_LOOPBACK_PORT_BIND_ATTEMPTS = 16
+HOST_LOOPBACK_CONTROL_PORT = 65535
 # IANA's dynamic port range, which is also Windows' default. The host-loopback
 # scenario draws the port of each TCP and UDP listener pair from it.
 HOST_LOOPBACK_PORT_RANGE = (49152, 65535)
@@ -599,6 +600,30 @@ def _available_tcp_address() -> tuple[str, int]:
         listener.bind(("127.0.0.1", 0))
         host, port = listener.getsockname()
         return str(host), int(port)
+
+
+def _available_tcp6_address() -> tuple[str, int]:
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        listener.bind(("::1", 0))
+        host, port, *_ = listener.getsockname()
+        return str(host), int(port)
+
+
+def _available_udp_address() -> tuple[str, int]:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        host, port = listener.getsockname()
+        return str(host), int(port)
+
+
+def _host_ipv4_address() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect(("192.0.2.1", 9))
+        address = str(probe.getsockname()[0])
+    if ipaddress.ip_address(address).is_loopback:
+        raise RuntimeError("the host's default route uses loopback")
+    return address
 
 
 def _persist_console_log(
@@ -3225,7 +3250,120 @@ def _bind_tcp_udp_listener_pair(
     ) from last_error
 
 
+class _HostLoopbackPublicationRace(RuntimeError):
+    pass
+
+
+def _send_host_loopback_request(address: str, port: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with socket.create_connection(
+                (address, port), timeout=min(timeout, 5)
+            ) as inbound:
+                inbound.settimeout(min(timeout, 5))
+                inbound.sendall(b"NVX-HOST-LOOPBACK-INBOUND\n")
+                inbound.shutdown(socket.SHUT_WR)
+                if inbound.recv(64) != b"NVX-HOST-LOOPBACK-TCP-ACK":
+                    raise ConnectionError(
+                        "guest listener did not acknowledge connection"
+                    )
+                return
+        except OSError as error:
+            if time.monotonic() >= deadline:
+                raise _HostLoopbackPublicationRace(
+                    f"guest TCP listener was not published on {address}:{port}"
+                ) from error
+            time.sleep(0.1)
+
+
+def _wait_for_host_loopback_udp_binding(port: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                return
+        if time.monotonic() >= deadline:
+            raise _HostLoopbackPublicationRace(
+                "generic guest UDP listener was not published on host loopback"
+            )
+        time.sleep(0.1)
+
+
+def _wait_for_host_loopback_tcp_binding(
+    family: int, address: str, port: int, timeout: float
+) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            if family == socket.AF_INET6:
+                probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                probe.bind((address, port))
+                probe.listen(1)
+            except OSError:
+                return
+        if time.monotonic() >= deadline:
+            raise _HostLoopbackPublicationRace(
+                f"generic guest TCP listener was not bound on {address}:{port}"
+            )
+        time.sleep(0.1)
+
+
+def _host_loopback_udp_roundtrip(
+    endpoint: socket.socket, guest_port: int, timeout: float
+) -> None:
+    endpoint.settimeout(1)
+    deadline = time.monotonic() + timeout
+    while True:
+        endpoint.sendto(
+            b"NVX-HOST-LOOPBACK-UDP\n",
+            ("127.0.0.1", guest_port),
+        )
+        try:
+            reply = endpoint.recv(128)
+        except OSError as error:
+            if time.monotonic() >= deadline:
+                raise _HostLoopbackPublicationRace(
+                    "generic guest UDP listener did not complete a round trip"
+                ) from error
+            continue
+        if reply != b"NVX-HOST-LOOPBACK-UDP-REPLY":
+            raise RuntimeError(f"unexpected generic host-loopback UDP reply: {reply!r}")
+        return
+
+
 def run_host_loopback_policy(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    for attempt in range(3):
+        try:
+            _run_host_loopback_policy_attempt(
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib=memory_mib,
+                timeout=timeout,
+                output_dir=output_dir,
+            )
+            return
+        except _HostLoopbackPublicationRace:
+            if attempt == 2:
+                raise
+            print("Retrying host-loopback allow with fresh publication ports")
+
+
+def _run_host_loopback_policy_attempt(
     executable: Path,
     kernel: Path,
     initrd: Path,
@@ -3286,6 +3424,10 @@ def run_host_loopback_policy(
                 GENERAL_PORT=str(denied_general_port),
                 PROXY_PORT=str(proxy_port),
                 GUEST_PORT="0",
+                PRIVATE_GUEST_PORT="0",
+                PRIVATE_IPV6_GUEST_PORT="0",
+                UDP_GUEST_PORT="0",
+                UDP_REPLY_PORT="0",
             ),
             HOST_LOOPBACK_UDP_CONTROL_MARKER,
             timeout=timeout,
@@ -3319,6 +3461,10 @@ def run_host_loopback_policy(
                 GENERAL_PORT=str(denied_general_port),
                 PROXY_PORT=str(proxy_port),
                 GUEST_PORT="0",
+                PRIVATE_GUEST_PORT="0",
+                PRIVATE_IPV6_GUEST_PORT="0",
+                UDP_GUEST_PORT="0",
+                UDP_REPLY_PORT="0",
             ),
             HOST_LOOPBACK_DENY_MARKER,
             timeout=timeout,
@@ -3359,8 +3505,36 @@ def run_host_loopback_policy(
     allowed_general.listen(1)
     allowed_general.settimeout(timeout)
     allowed_general_port = int(allowed_general.getsockname()[1])
-    _, host_forward_port = _available_tcp_address()
-    guest_forward_port = 18081
+    _, generic_guest_port = _available_tcp_address()
+    listener_ports = [generic_guest_port]
+    while len(listener_ports) < 3:
+        _, candidate = _available_tcp_address()
+        if candidate not in listener_ports:
+            listener_ports.append(candidate)
+    (
+        _,
+        host_forward_port,
+        private_guest_port,
+    ) = listener_ports
+    while True:
+        _, private_ipv6_guest_port = _available_tcp6_address()
+        if private_ipv6_guest_port not in listener_ports:
+            break
+    while True:
+        _, udp_guest_port = _available_udp_address()
+        if udp_guest_port not in listener_ports:
+            break
+    while True:
+        udp_roundtrip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_roundtrip.bind(("127.0.0.1", 0))
+        udp_reply_port = int(udp_roundtrip.getsockname()[1])
+        if udp_reply_port not in (
+            *listener_ports,
+            udp_guest_port,
+            HOST_LOOPBACK_CONTROL_PORT,
+        ):
+            break
+        udp_roundtrip.close()
     allow_errors: list[Exception] = []
     allow_server = threading.Thread(
         target=_http_server,
@@ -3389,10 +3563,21 @@ def run_host_loopback_policy(
             (
                 "--host-loopback",
                 "allow",
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                f"{DIRECTIONAL_NETWORK_CIDR}:tcp",
+                "--network-egress-allow",
+                f"{DIRECTIONAL_NETWORK_CIDR}:udp:{udp_reply_port}",
+                "--network-egress-allow",
+                (
+                    f"{DIRECTIONAL_NETWORK_GUEST_IPV6}/"
+                    f"{DIRECTIONAL_NETWORK_IPV6_PREFIX_LENGTH}:tcp"
+                ),
                 "--network-ingress",
                 "deny",
                 "--host-loopback-forward",
-                f"tcp:{host_forward_port}:{guest_forward_port}",
+                f"tcp:{host_forward_port}:{generic_guest_port}",
             )
         )
         with OpenvmmProcess(
@@ -3410,16 +3595,54 @@ def run_host_loopback_policy(
                     GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
                     GENERAL_PORT=str(allowed_general_port),
                     PROXY_PORT="0",
-                    GUEST_PORT=str(guest_forward_port),
+                    GUEST_PORT=str(generic_guest_port),
+                    PRIVATE_GUEST_PORT=str(private_guest_port),
+                    PRIVATE_IPV6_GUEST_PORT=str(private_ipv6_guest_port),
+                    UDP_GUEST_PORT=str(udp_guest_port),
+                    UDP_REPLY_PORT=str(udp_reply_port),
                 ),
             )
             process.wait_for_line(HOST_LOOPBACK_INGRESS_READY_MARKER, timeout)
-            with socket.create_connection(
-                ("127.0.0.1", host_forward_port), timeout=min(timeout, 5)
-            ) as inbound:
-                inbound.sendall(b"NVX-HOST-LOOPBACK-INBOUND\n")
-                time.sleep(1)
-                inbound.shutdown(socket.SHUT_WR)
+            for address, port, description in (
+                (
+                    _host_ipv4_address(),
+                    generic_guest_port,
+                    "the host's non-loopback interface",
+                ),
+                (
+                    "127.0.0.1",
+                    private_guest_port,
+                    "a guest-loopback-only listener",
+                ),
+                (
+                    "::1",
+                    private_ipv6_guest_port,
+                    "an IPv6 guest-loopback-only listener",
+                ),
+            ):
+                try:
+                    unexpected = socket.create_connection((address, port), timeout=1)
+                except OSError:
+                    pass
+                else:
+                    unexpected.close()
+                    raise RuntimeError(
+                        f"host-loopback allow exposed {description} on {address}:{port}"
+                    )
+            _wait_for_host_loopback_tcp_binding(
+                socket.AF_INET, "127.0.0.1", generic_guest_port, timeout
+            )
+            _wait_for_host_loopback_tcp_binding(
+                socket.AF_INET6, "::1", generic_guest_port, timeout
+            )
+            for address, port in (
+                ("::1", generic_guest_port),
+                ("127.0.0.1", generic_guest_port),
+                ("127.0.0.1", host_forward_port),
+            ):
+                _send_host_loopback_request(address, port, timeout)
+            _wait_for_host_loopback_udp_binding(udp_guest_port, timeout)
+            _host_loopback_udp_roundtrip(udp_roundtrip, udp_guest_port, timeout)
             process.wait_for_line(HOST_LOOPBACK_ALLOW_MARKER, timeout)
             allowed = process.wait(timeout)
         if allowed.returncode != 0:
@@ -3434,6 +3657,7 @@ def run_host_loopback_policy(
                 0
             ]
     finally:
+        udp_roundtrip.close()
         allowed_general.close()
         allow_server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)
 
@@ -3459,21 +3683,6 @@ def run_host_loopback_rejections(
     output_dir: Path,
 ) -> None:
     for name, extra, expected in (
-        (
-            "generic-allow",
-            ("--host-loopback", "allow"),
-            b"does not support generic host-loopback connectivity",
-        ),
-        (
-            "generic-allow-with-proxy",
-            (
-                "--host-loopback",
-                "allow",
-                "--network-proxy",
-                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:3128",
-            ),
-            b"does not support generic host-loopback connectivity",
-        ),
         (
             "deny-forward",
             (

@@ -347,13 +347,13 @@ provisioned again to accept the change.
   behind the gateway's counterpart, such as `fd00::a00:1`. The guest names the gateway as its
   DNS server in `/etc/resolv.conf` when the policy allows TCP or UDP port 53 to it, and
   otherwise the gateway's IPv6 address when the policy allows DNS to that one. Choose a guest
-  network that contains no address the guest must reach. Ingress must be `deny`, and
-  host-loopback access must be `deny` unless ports are forwarded, as described next.
+  network that contains no address the guest must reach. Ordinary ingress must be `deny`;
+  host-loopback access may be allowed independently, as described next.
 
-### Native proxy and forwarded ports
+### Native proxy and host loopback
 
-Two provision options connect the guest to host loopback without opening it in general. They
-are exclusive: a proxy needs host-loopback access denied, and forwarded ports need it allowed.
+The proxy keeps general host-loopback access denied. Generic listener publication and explicit
+forwards require host-loopback access allowed.
 
 - `runtimeConfig.networkProxy` (`ProvisionRequest::with_network_proxy`) names an HTTP or HTTPS
   proxy that listens on host IPv4 loopback, such as `http://127.0.0.1:3128` or
@@ -366,15 +366,20 @@ are exclusive: a proxy needs host-loopback access denied, and forwarded ports ne
   `https_proxy` naming the proxy at the gateway, such as `http://10.0.0.1:3128`, and `NO_PROXY`
   and `no_proxy` set to `localhost,127.0.0.1`; an HTTPS proxy's certificate must therefore be
   valid for the gateway's address.
+- `network.ingress.hostLoopback: allow` lets the guest reach host-loopback services through its
+  gateway. The NVX guest also publishes each TCP or UDP listener bound to a non-loopback guest
+  address on the same host IPv4 or IPv6 loopback port. A listener bound only to guest
+  `127.0.0.1` or `::1` remains private to the sandbox, and OpenVMM never binds a published
+  listener on a LAN or public interface. The fixed, strictly validated publication flow is
+  endpoint control traffic and bypasses tenant egress rules; replies and all other
+  guest-originated traffic remain subject to those rules.
 - `hostLoopbackForwards` of the sandbox spec (`SandboxSpec::with_host_loopback_forward`, passed
   to `AciEdgeSandbox::provision_with`) publishes up to 64 guest ports on host loopback: OpenVMM listens on
   `127.0.0.1:hostPort` and relays each TCP connection or UDP datagram to the guest's
   `guestPort`. Ports are nonzero, and a host port appears at most once per protocol. Forwarded
-  ports need `network.ingress.hostLoopback: allow`, which also lets the guest reach every host
-  loopback service through its gateway; `allow` without forwarded ports is rejected. The guest
-  answers forwarded traffic at addresses that OpenVMM assigns inside the guest network, so the
-  egress default must be `allow`, which leaves the guest's other egress open, and no deny rule
-  may cover the guest network.
+  ports need `network.ingress.hostLoopback: allow`. The guest answers forwarded traffic at
+  addresses that OpenVMM assigns inside the guest network, so the egress default must be `allow`
+  and no deny rule may overlap that network.
 
 Only the guest sets the proxy variables: an exec whose `process.env` names one of them, in any
 case, fails with `policy_validation`, with or without a proxy.
@@ -531,7 +536,7 @@ terminate the VM when the caller exits.
 | `network.egress.default` | applied (`allow` or `deny`) | n/a |
 | `network.egress.allow`, `deny` | applied; see [Network rules](#network-rules) | n/a |
 | `network.ingress.default` | `deny` applied; `allow` rejected | n/a |
-| `network.ingress.hostLoopback` | `deny` applied (also when omitted); `allow` rejected | n/a |
+| `network.ingress.hostLoopback` | `allow` or `deny` applied; omitted means `deny` | n/a |
 | `microvm.provision.memoryMib` | applied | n/a |
 | `process.commandLine` | n/a | run as `/bin/sh -c <commandLine>`; at most 4096 bytes |
 | `process.argv` (ACI Edge Sandboxes extension) | n/a | applied; absolute program, up to 64 arguments of 4096 bytes |

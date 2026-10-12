@@ -25,14 +25,14 @@ use super::platform;
 use super::protocol::CAPABILITY_LEN;
 use crate::error::{Error, ErrorCode, Result};
 use crate::id::SandboxId;
-use crate::model::NetworkPolicy;
+use crate::model::{HostLoopbackForward, NetworkPolicy};
 
 /// Version of the state files written by this crate.
 ///
-/// Version 1 described sandboxes assembled from image layers and a scratch disk, and version 2
-/// exported the mapped host paths as one directory whose bind mounts the kernel command line
-/// listed.
-pub(crate) const STATE_FORMAT: u32 = 3;
+/// Version 1 described sandboxes assembled from image layers and a scratch disk, version 2
+/// exported mapped host paths as one directory, version 3 added single-file mappings, and version
+/// 4 records host-loopback forwards.
+pub(crate) const STATE_FORMAT: u32 = 4;
 /// Backend key recorded in every sandbox.
 pub(crate) const BACKEND_KEY: &str = "openvmm";
 /// Linux control socket name.
@@ -56,6 +56,8 @@ pub(crate) struct SandboxRecord {
     pub(crate) network: Option<NetworkPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) filesystem: Option<HostMapping>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) host_loopback_forwards: Vec<HostLoopbackForward>,
     pub(crate) memory_mib: u32,
     pub(crate) workload_uid: u32,
     pub(crate) workload_gid: u32,
@@ -440,6 +442,7 @@ mod tests {
             backend: BACKEND_KEY.to_owned(),
             network: None,
             filesystem: None,
+            host_loopback_forwards: Vec::new(),
             memory_mib: 256,
             workload_uid: 65534,
             workload_gid: 65534,

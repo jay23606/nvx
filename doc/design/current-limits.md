@@ -21,8 +21,8 @@ The current ABI family intentionally does not provide:
 - sandbox-block, network, or control-console construction through the
    management RPC, or its restore of snapshots that contain them;
 - host networking other than the in-process portable endpoint, unrestricted
-   ingress, generic bidirectional host-loopback connectivity, or live
-   host-loopback port forwards in snapshots;
+   ingress, or live host-loopback listener publication and port forwards in
+   snapshots;
 - a production control-session RPC protocol beyond the managed lifecycle
    subset;
 - replaceable sandbox configuration, a production OCI agent, or a public sandbox snapshot workflow;

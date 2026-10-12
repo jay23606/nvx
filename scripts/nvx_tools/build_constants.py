@@ -83,6 +83,7 @@ class KernelBuildConstants:
     # IPv4 one. SIT would add an sit0 device that decapsulates IPv6 from IPv4.
     REQUIRED_NETWORK_CONFIG: Final = (
         "CONFIG_INET=y",
+        "CONFIG_INET_UDP_DIAG=y",
         "CONFIG_IPV6=y",
         "# CONFIG_IPV6_SIT is not set",
         "CONFIG_VIRTIO_NET=y",
@@ -342,7 +343,11 @@ class InitramfsBuildConstants:
     # adds about 700 KB to the initramfs, and every unpacked kilobyte delays
     # cold boot. nvx-exit is also a restored guest's usual first exec.
     MUSL_COMPILER: Final = "musl-gcc"
-    MUSL_STATIC_HELPERS: Final = ("nvx-time", "nvx-exit")
+    MUSL_STATIC_HELPERS: Final = (
+        "nvx-time",
+        "nvx-exit",
+        "nvx-host-loopback-agent",
+    )
     TIME_PROBE_NAME: Final = "nvx-time-probe"
     TIME_PROBE_CFLAGS: Final = (
         "-std=gnu11",

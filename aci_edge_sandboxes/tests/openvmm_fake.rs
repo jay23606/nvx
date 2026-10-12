@@ -17,8 +17,9 @@ use std::time::{Duration, Instant, SystemTime};
 use aci_edge_sandboxes::openvmm::{Hypervisor, OpenVmmConfig};
 use aci_edge_sandboxes::{
     Access, AciEdgeSandbox, EgressPolicy, ErrorCode, ExecFailure, ExecOutcome, ExecOutput,
-    ExecRequest, FilesystemPolicy, NetworkPolicy, NetworkPort, NetworkRule, ProcessSpec, Protocol,
-    ProvisionRequest, SandboxId, StdinMode,
+    ExecRequest, FilesystemPolicy, ForwardProtocol, HostLoopbackForward, NetworkPolicy,
+    NetworkPort, NetworkRule, ProcessSpec, Protocol, ProvisionRequest, SandboxId, SandboxSpec,
+    StdinMode,
 };
 use tempfile::TempDir;
 
@@ -1358,6 +1359,38 @@ fn launch_arguments_select_the_managed_alpine_guest() {
             .iter()
             .any(|argument| argument == "--microvm-sandbox-block")
     );
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+
+    let mut loopback = NetworkPolicy::egress(Access::Allow);
+    loopback.ingress.host_loopback = Some(Access::Allow);
+    let request = ProvisionRequest::new().with_network(loopback);
+    let spec = SandboxSpec::new().with_host_loopback_forward(HostLoopbackForward::new(
+        ForwardProtocol::Tcp,
+        18080,
+        8080,
+    ));
+    let mut denied_replies = request.clone();
+    denied_replies
+        .network
+        .as_mut()
+        .unwrap()
+        .egress
+        .deny
+        .push(NetworkRule::to("10.0.0.0/24"));
+    let error = nvx.provision_with(&denied_replies, &spec).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::PolicyValidation);
+    assert!(error.message().contains("forward replies"), "{error}");
+    let sandbox_id = nvx.provision_with(&request, &spec).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let arguments = fixture.launch_arguments(&sandbox_id);
+    assert!(has_pair(&arguments, "--network-ingress", "deny"));
+    assert!(has_pair(&arguments, "--host-loopback", "allow"));
+    assert!(has_pair(
+        &arguments,
+        "--host-loopback-forward",
+        "tcp:18080:8080"
+    ));
     nvx.stop(&sandbox_id).unwrap();
     nvx.deprovision(&sandbox_id).unwrap();
 

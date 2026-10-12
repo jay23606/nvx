@@ -260,6 +260,22 @@ if [ -n "$nip" ]; then
         echo "VIRTNET-OK: configured $ndev as $nip/$nmask"
     fi
 fi
+host_loopback=$(sed -n 's/.*nvx_host_loopback=\([^ ]*\).*/\1/p' /proc/cmdline)
+case "$host_loopback" in
+    '') ;;
+    allow)
+        [ -n "$ngw" ] ||
+            fatal "host-loopback listener publication requires an IPv4 gateway"
+        /sbin/nvx-host-loopback-agent "$ngw" &
+        host_loopback_agent_pid=$!
+        sleep 0.05
+        kill -0 "$host_loopback_agent_pid" 2>/dev/null ||
+            fatal "host-loopback listener publisher did not start"
+        ;;
+    *)
+        fatal "unsupported host-loopback posture: $host_loopback"
+        ;;
+esac
 if [ "$sandbox_mode" = true ]; then
     [ -x /sbin/nvx-init-agent ] ||
         workload_fatal "selected guest cannot act as sandbox control"

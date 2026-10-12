@@ -179,7 +179,6 @@ pub fn provision_capabilities(
             check_access(backend, field, access, allow, deny)?;
         }
         if let Some(access) = network.ingress.host_loopback {
-            // Forwarded ports are the only host-loopback access a backend may honor.
             let forwarded =
                 capabilities.spec.host_loopback_forwards && !spec.host_loopback_forwards.is_empty();
             check_access(

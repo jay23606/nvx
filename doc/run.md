@@ -332,15 +332,18 @@ blocked, while the exact TCP proxy endpoint remains available. UDP on that
 same port and other host service ports remain blocked even with ordinary
 egress allowed.
 
-The portable profile does **not** support generic bidirectional host-loopback
-allow. Explicit `--host-loopback allow` without any forward is rejected before
-VM resources are opened. For deliberate port publishing, repeat
-`--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form to expose
-only selected localhost ports toward the guest, with explicit
-`--host-loopback allow`. These forwards do not satisfy a generic allow policy
-that provides no port list. Omitting `--host-loopback` preserves existing
-guest-to-host mapping without publishing guest ports. Guest-originated traffic
-remains subject to egress policy.
+With `--host-loopback allow`, an NVX guest publishes TCP and UDP listeners
+bound to non-loopback guest addresses on matching host IPv4 or IPv6 loopback
+ports. A listener bound only to guest `127.0.0.1` or `::1` stays private to the
+sandbox, and OpenVMM never binds a published listener on a LAN or public
+interface. Repeat `--host-loopback-forward
+tcp:HOST_PORT:GUEST_PORT` or its UDP form to add deliberate remapped ports.
+Omitting `--host-loopback` preserves existing guest-to-host mapping without
+publishing guest ports. The fixed, strictly validated listener-publication
+flow is endpoint control traffic and is consumed before tenant egress policy;
+published-connection replies and all other guest-originated traffic remain
+subject to that policy. Snapshot capture and restore reject host-loopback allow
+and live forwards because their host sockets are process-local.
 
 Most `nvx.py run` options pass through unchanged: `--machine`, `--processors`,
 `--cpu-profile`, `--mount`, `--net`, `--network-profile`, `--cmdline`,

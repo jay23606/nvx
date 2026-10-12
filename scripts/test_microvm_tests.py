@@ -2645,14 +2645,12 @@ class MicrovmTests(unittest.TestCase):
         ):
             endpoint.close.assert_called_once_with()
 
-    def test_host_loopback_rejections_cover_generic_allow_and_explicit_denial(self):
+    def test_host_loopback_rejections_cover_invalid_explicit_options(self):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(microvm_tests, "OpenvmmProcess") as process:
                 process.return_value.__enter__.return_value.wait.side_effect = [
                     openvmm_process.OpenvmmProcessResult(2, message)
                     for message in (
-                        b"does not support generic host-loopback connectivity",
-                        b"does not support generic host-loopback connectivity",
                         b"--host-loopback-forward requires explicit --host-loopback allow",
                         b"must match the guest gateway",
                     )
@@ -2667,19 +2665,16 @@ class MicrovmTests(unittest.TestCase):
                     output_dir=Path(temporary),
                 )
         commands = [call.args[0] for call in process.call_args_list]
-        self.assertEqual(len(commands), 4)
+        self.assertEqual(len(commands), 2)
         self.assertEqual(
             [command[command.index("--host-loopback") + 1] for command in commands],
-            ["allow", "allow", "deny", "deny"],
+            ["deny", "deny"],
         )
-        for command in commands[:2]:
-            self.assertNotIn("--host-loopback-forward", command)
-            self.assertIn("--pidfile", command)
+        self.assertIn("--host-loopback-forward", commands[0])
         self.assertIn("--network-proxy", commands[1])
-        self.assertIn("--host-loopback-forward", commands[2])
 
     def test_host_loopback_rejection_requires_diagnostic_and_no_boot(self):
-        diagnostic = b"does not support generic host-loopback connectivity"
+        diagnostic = b"--host-loopback-forward requires explicit --host-loopback allow"
         for result in (
             openvmm_process.OpenvmmProcessResult(0, diagnostic),
             openvmm_process.OpenvmmProcessResult(2, b"failed to create pidfile"),
@@ -2711,8 +2706,9 @@ class MicrovmTests(unittest.TestCase):
                     ports = {
                         int(line.split()[5])
                         for line in script.splitlines()
-                        if line.strip().startswith("nc -u")
+                        if line.strip().startswith("nc -u -w 1")
                     }
+                    ports.discard(0)
                     for port in ports:
                         sender.sendto(
                             b"NVX-HOST-LOOPBACK-UDP-CONTROL",
@@ -2790,6 +2786,10 @@ class MicrovmTests(unittest.TestCase):
                     GENERAL_PORT="8444",
                     PROXY_PORT="8443",
                     GUEST_PORT="0",
+                    PRIVATE_GUEST_PORT="0",
+                    PRIVATE_IPV6_GUEST_PORT="0",
+                    UDP_GUEST_PORT="0",
+                    UDP_REPLY_PORT="0",
                 ).replace("nvx-exit", "nvx_exit")
                 result = subprocess.run(
                     [shell, "-s"],
@@ -2821,6 +2821,10 @@ class MicrovmTests(unittest.TestCase):
             GENERAL_PORT="8444",
             PROXY_PORT="8443",
             GUEST_PORT="0",
+            PRIVATE_GUEST_PORT="0",
+            PRIVATE_IPV6_GUEST_PORT="0",
+            UDP_GUEST_PORT="0",
+            UDP_REPLY_PORT="0",
         )
         self.assertIn("nc -u -w 1 10.0.0.1 8443", script)
         self.assertIn("nc -u -w 1 10.0.0.1 8444", script)
@@ -2834,6 +2838,16 @@ class MicrovmTests(unittest.TestCase):
         listener = (
             f"   0: {'0' * 32}:1F90 {'0' * 32}:0000 0A 00000000:00000000 00:00000000\n"
         )
+        private_listener = (
+            "   0: 0100007F:1F91 00000000:0000 0A 00000000:00000000 00:00000000\n"
+        )
+        private_ipv6_listener = (
+            f"   1: {'0' * 24}01000000:1F94 {'0' * 32}:0000 "
+            "0A 00000000:00000000 00:00000000\n"
+        )
+        udp_listener = (
+            "   0: 00000000:1F92 00000000:0000 07 00000000:00000000 00:00000000\n"
+        )
         for label, tcp6, expected, marker in (
             ("listed", header + listener, 0, "NVX-HOST-LOOPBACK-ALLOW-OK"),
             ("missing", header, 95, "NVX-HOST-LOOPBACK-FAIL code=95"),
@@ -2841,8 +2855,18 @@ class MicrovmTests(unittest.TestCase):
             with self.subTest(label), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / "proc" / "net").mkdir(parents=True)
-                (root / "proc" / "net" / "tcp").write_text(header, encoding="utf-8")
+                (root / "proc" / "net" / "tcp").write_text(
+                    header + private_listener, encoding="utf-8"
+                )
                 (root / "proc" / "net" / "tcp6").write_text(tcp6, encoding="utf-8")
+                with (root / "proc" / "net" / "tcp6").open(
+                    "a", encoding="utf-8"
+                ) as tcp6_file:
+                    tcp6_file.write(private_ipv6_listener)
+                (root / "proc" / "net" / "udp").write_text(
+                    header + udp_listener, encoding="utf-8"
+                )
+                (root / "proc" / "net" / "udp6").write_text(header, encoding="utf-8")
                 script = (
                     microvm_tests._render_script(
                         "host-loopback-policy.sh.in",
@@ -2851,6 +2875,10 @@ class MicrovmTests(unittest.TestCase):
                         GENERAL_PORT="8444",
                         PROXY_PORT="8443",
                         GUEST_PORT="8080",
+                        PRIVATE_GUEST_PORT="8081",
+                        PRIVATE_IPV6_GUEST_PORT="8084",
+                        UDP_GUEST_PORT="8082",
+                        UDP_REPLY_PORT="8083",
                     )
                     .replace("nvx-exit", "nvx_exit")
                     .replace("/proc/net/", f"{root.as_posix()}/proc/net/")
@@ -2858,12 +2886,23 @@ class MicrovmTests(unittest.TestCase):
                         "/tmp/nvx-host-loopback-inbound",
                         f"{root.as_posix()}/nvx-host-loopback-inbound",
                     )
+                    .replace(
+                        "/tmp/nvx-host-loopback-udp",
+                        f"{root.as_posix()}/nvx-host-loopback-udp",
+                    )
                 )
                 result = subprocess.run(
                     [shell, "-s"],
                     input=(
                         "wget() { echo NVX-HOST-LOOPBACK-GENERAL; }\n"
-                        "nc() { sleep 0.3; echo NVX-HOST-LOOPBACK-INBOUND; }\n"
+                        'nc() { case " $* " in '
+                        '*" -s 127.0.0.1 "*) sleep 0.3 ;; '
+                        '*" -s ::1 "*) sleep 0.3 ;; '
+                        f'*" -u -l "*) sleep 0.3; echo '
+                        f"NVX-HOST-LOOPBACK-UDP >"
+                        f"{root.as_posix()}/nvx-host-loopback-udp ;; "
+                        '*" -u -w "*) : ;; '
+                        "*) sleep 0.3; echo NVX-HOST-LOOPBACK-INBOUND ;; esac; }\n"
                         'nvx_exit() { exit "$1"; }\n' + script
                     ),
                     text=True,

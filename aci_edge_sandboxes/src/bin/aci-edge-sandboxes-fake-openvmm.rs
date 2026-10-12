@@ -221,7 +221,7 @@ fn main() -> ExitCode {
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
-    const VALUED: [&str; 23] = [
+    const VALUED: [&str; 24] = [
         "--mount-aggregate",
         "--mount-child",
         "--mount-deny",
@@ -245,6 +245,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         "--network-egress",
         "--network-ingress",
         "--host-loopback",
+        "--host-loopback-forward",
     ];
     let mut values: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut flags = BTreeSet::new();

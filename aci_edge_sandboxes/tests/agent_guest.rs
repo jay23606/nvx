@@ -386,14 +386,14 @@ fn resident_bytes() -> u64 {
 }
 
 /// Runs a Python program with `args` in the guest and returns what it printed.
-fn python(client: &AciEdgeSandbox, id: &SandboxId, program: &str, args: &[&str]) -> String {
+fn python_request(program: &str, args: &[&str]) -> ExecRequest {
     let mut argv = vec!["/bin/sh", "-c", "exec python3 -c \"$@\"", "sh", program];
     argv.extend_from_slice(args);
-    let output = exec(
-        client,
-        id,
-        &ExecRequest::argv(argv).with_timeout(Duration::from_secs(120)),
-    );
+    ExecRequest::argv(argv).with_timeout(Duration::from_secs(120))
+}
+
+fn python(client: &AciEdgeSandbox, id: &SandboxId, program: &str, args: &[&str]) -> String {
+    let output = exec(client, id, &python_request(program, args));
     assert_eq!(output.outcome, ExecOutcome::Exited(0), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
@@ -2467,6 +2467,17 @@ udp.sendto(b"udp:" + data, peer)
 print("served")
 "#;
 
+const GENERIC_LOOPBACK_LISTENER: &str = r#"
+import socket, sys
+listener = socket.create_server(("0.0.0.0", int(sys.argv[1])))
+listener.settimeout(30)
+print("ready", flush=True)
+connection, _ = listener.accept()
+connection.sendall(b"published")
+connection.close()
+print("served")
+"#;
+
 /// Returns a host loopback port that is free now.
 fn free_loopback_port(udp: bool) -> u16 {
     if udp {
@@ -2486,7 +2497,7 @@ fn free_loopback_port(udp: bool) -> u16 {
 
 #[test]
 #[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
-fn forwarded_ports_publish_guest_listeners_on_host_loopback() {
+fn host_loopback_is_bidirectional_and_explicit_forwards_still_work() {
     use std::io::Read;
     use std::net::TcpStream;
 
@@ -2518,16 +2529,12 @@ fn forwarded_ports_publish_guest_listeners_on_host_loopback() {
         (ProvisionRequest::new().with_network(network), spec)
     };
 
-    // Generic host-loopback access, forwards without it, and forwards whose replies egress
-    // would drop all fail before any VM exists.
+    // Forwards without host-loopback access, and forwards whose replies egress would drop,
+    // fail before any VM exists.
     let mut closed = open.clone();
     closed.egress =
         EgressPolicy::new(Access::Deny).with_allow(NetworkRule::to(format!("{host}/32")));
     for (request, spec) in [
-        (
-            ProvisionRequest::new().with_network(open.clone()),
-            SandboxSpec::new(),
-        ),
         forwarded(NetworkPolicy::egress(Access::Allow), 18080, 18081),
         forwarded(closed, 18080, 18081),
     ] {
@@ -2536,6 +2543,48 @@ fn forwarded_ports_publish_guest_listeners_on_host_loopback() {
             ErrorCode::PolicyValidation
         );
     }
+
+    // No caller-supplied forward is needed for a workload listener on a non-loopback address.
+    let generic_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let generic_port = generic_reservation.local_addr().unwrap().port();
+    let generic = started(
+        &client,
+        &backend,
+        &ProvisionRequest::new().with_network(open.clone()),
+    );
+    let generic_port_argument = generic_port.to_string();
+    let mut served = client
+        .exec(
+            &generic.id,
+            &python_request(GENERIC_LOOPBACK_LISTENER, &[generic_port_argument.as_str()]),
+        )
+        .unwrap();
+    let mut stdout = served.take_stdout().unwrap();
+    let mut ready = [0u8; 6];
+    stdout.read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"ready\n");
+    drop(generic_reservation);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let greeting = loop {
+        let mut text = String::new();
+        let answered = TcpStream::connect((Ipv4Addr::LOCALHOST, generic_port))
+            .and_then(|mut stream| {
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                stream.read_to_string(&mut text)
+            })
+            .is_ok_and(|_| !text.is_empty());
+        if answered || Instant::now() > deadline {
+            break text;
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(greeting, "published");
+    let mut generic_result = String::new();
+    stdout.read_to_string(&mut generic_result).unwrap();
+    assert_eq!(generic_result, "served\n");
+    assert_eq!(served.wait().unwrap(), ExecOutcome::Exited(0));
+    assert_graceful(client.stop(&generic.id));
+    client.deprovision(&generic.release()).unwrap();
 
     // OpenVMM binds the host ports when it starts, and another process can take a port released
     // here before then, so a failed start is retried with other ports.

@@ -355,13 +355,16 @@ endpoint and requires the profile and policy again; native sockets, DNS
 requests, and flow objects are never serialized.
 
 By default, and subject to the egress policy, the gateway maps guest TCP and
-UDP flows onto host loopback. The portable NAT cannot offer generic
-bidirectional host-loopback connectivity, so an explicit host-loopback allow is
-accepted only with explicit localhost TCP or UDP port forwards into the guest,
-at most 64 of them. Forwards are process-local attachments, and snapshot
-capture and restore reject them. Host-loopback deny blocks gateway and
-host-local destinations and every forward. One exact gateway TCP proxy endpoint
-may remain available under deny and is bound into the policy digest.
+UDP flows onto host loopback. Under explicit host-loopback allow, the NVX guest
+publishes non-loopback TCP and UDP listeners through a bounded link-local
+control protocol; the endpoint binds matching ports only on host loopback and
+forwards them to the guest. Guest `127.0.0.1` and `::1` listeners remain
+sandbox-local. Up to 64 explicit remapped forwards remain available in
+addition to at most 1024 live guest publications. These sockets are
+process-local attachments, so snapshot capture and restore reject
+host-loopback allow and explicit forwards. Host-loopback deny blocks gateway
+and host-local destinations and every forward. One exact gateway TCP proxy
+endpoint may remain available under deny and is bound into the policy digest.
 Capture quiesces the endpoint, drains completion ownership, and requires the
 saved queues to contain no unrepresented RX or TX packets. It then saves the
 queue lifecycle, negotiated features, link state, and endpoint generation.

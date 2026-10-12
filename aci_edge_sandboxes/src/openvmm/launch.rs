@@ -144,6 +144,18 @@ pub(crate) fn openvmm_arguments(
             .into_iter()
             .map(OsString::from),
     );
+    for forward in &record.host_loopback_forwards {
+        arguments.push("--host-loopback-forward".into());
+        arguments.push(
+            format!(
+                "{}:{}:{}",
+                forward.protocol.as_str(),
+                forward.host_port,
+                forward.guest_port
+            )
+            .into(),
+        );
+    }
     if let Some(mapping) = &record.filesystem {
         arguments.extend(
             filesystem::openvmm_arguments(mapping)
@@ -166,6 +178,7 @@ mod tests {
             backend: BACKEND_KEY.to_owned(),
             network: None,
             filesystem: None,
+            host_loopback_forwards: Vec::new(),
             memory_mib: 256,
             workload_uid: 65534,
             workload_gid: 65534,

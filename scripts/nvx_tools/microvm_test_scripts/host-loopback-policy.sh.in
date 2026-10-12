@@ -35,8 +35,28 @@ allow)
         fail 93
     [ "$general" = NVX-HOST-LOOPBACK-GENERAL ] || fail 94
     rm -f /tmp/nvx-host-loopback-inbound
-    nc -l -p @GUEST_PORT@ -w 5 >/tmp/nvx-host-loopback-inbound &
+    rm -f /tmp/nvx-host-loopback-inbound-ipv6
+    rm -f /tmp/nvx-host-loopback-explicit
+    rm -f /tmp/nvx-host-loopback-private
+    rm -f /tmp/nvx-host-loopback-private-ipv6
+    serve_tcp() {
+        printf 'NVX-HOST-LOOPBACK-TCP-ACK' |
+            nc -l -p @GUEST_PORT@ -w 15 >/tmp/nvx-host-loopback-inbound || true
+        printf 'NVX-HOST-LOOPBACK-TCP-ACK' |
+            nc -l -p @GUEST_PORT@ -w 15 >/tmp/nvx-host-loopback-inbound-ipv6 || true
+        printf 'NVX-HOST-LOOPBACK-TCP-ACK' |
+            nc -l -p @GUEST_PORT@ -w 15 >/tmp/nvx-host-loopback-explicit || true
+    }
+    serve_tcp &
     listener_pid=$!
+    nc -l -s 127.0.0.1 -p @PRIVATE_GUEST_PORT@ -w 3 \
+        >/tmp/nvx-host-loopback-private &
+    private_listener_pid=$!
+    nc -l -s ::1 -p @PRIVATE_IPV6_GUEST_PORT@ -w 3 \
+        >/tmp/nvx-host-loopback-private-ipv6 &
+    private_ipv6_listener_pid=$!
+    nc -u -l -p @UDP_GUEST_PORT@ -w 15 >/tmp/nvx-host-loopback-udp &
+    udp_listener_pid=$!
     port_hex=$(printf '%04X' @GUEST_PORT@)
     tries=0
     # The listener is dual-stack, so the kernel lists it among IPv6 sockets.
@@ -48,13 +68,66 @@ allow)
         tries=$((tries + 1))
         sleep 0.05
     done
+    private_port_hex=$(printf '%04X' @PRIVATE_GUEST_PORT@)
+    tries=0
+    while ! awk -v address="0100007F:$private_port_hex" \
+        '$2 == address && $4 == "0A" { found = 1 } END { exit !found }' \
+        /proc/net/tcp; do
+        kill -0 "$private_listener_pid" 2>/dev/null || fail 96
+        [ "$tries" -lt 100 ] || fail 96
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+    private_ipv6_port_hex=$(printf '%04X' @PRIVATE_IPV6_GUEST_PORT@)
+    tries=0
+    while ! awk \
+        -v address="00000000000000000000000001000000:$private_ipv6_port_hex" \
+        '$2 == address && $4 == "0A" { found = 1 } END { exit !found }' \
+        /proc/net/tcp6; do
+        kill -0 "$private_ipv6_listener_pid" 2>/dev/null || fail 96
+        [ "$tries" -lt 100 ] || fail 96
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+    udp_port_hex=$(printf '%04X' @UDP_GUEST_PORT@)
+    tries=0
+    while ! awk -v port=":$udp_port_hex" \
+        '$2 ~ port "$" && $4 == "07" { found = 1 } END { exit !found }' \
+        /proc/net/udp /proc/net/udp6; do
+        kill -0 "$udp_listener_pid" 2>/dev/null || fail 95
+        [ "$tries" -lt 100 ] || fail 95
+        tries=$((tries + 1))
+        sleep 0.05
+    done
     echo NVX-HOST-LOOPBACK-INGRESS-READY
     wait "$listener_pid" || true
+    wait "$private_listener_pid" || true
+    wait "$private_ipv6_listener_pid" || true
+    wait "$udp_listener_pid" || true
     if ! grep -qx NVX-HOST-LOOPBACK-INBOUND /tmp/nvx-host-loopback-inbound; then
         wc -c /tmp/nvx-host-loopback-inbound
         od -An -tx1 /tmp/nvx-host-loopback-inbound
         fail 97
     fi
+    if ! grep -qx NVX-HOST-LOOPBACK-INBOUND /tmp/nvx-host-loopback-inbound-ipv6; then
+        fail 97
+    fi
+    if ! grep -qx NVX-HOST-LOOPBACK-INBOUND /tmp/nvx-host-loopback-explicit; then
+        wc -c /tmp/nvx-host-loopback-explicit
+        od -An -tx1 /tmp/nvx-host-loopback-explicit
+        fail 97
+    fi
+    if [ -s /tmp/nvx-host-loopback-private ]; then
+        fail 96
+    fi
+    if [ -s /tmp/nvx-host-loopback-private-ipv6 ]; then
+        fail 96
+    fi
+    if ! grep -qx NVX-HOST-LOOPBACK-UDP /tmp/nvx-host-loopback-udp; then
+        fail 97
+    fi
+    printf 'NVX-HOST-LOOPBACK-UDP-REPLY' |
+        nc -u -w 1 @GATEWAY_IPV4@ @UDP_REPLY_PORT@ || fail 99
     echo NVX-HOST-LOOPBACK-ALLOW-OK
     ;;
 *)

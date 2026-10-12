@@ -10,15 +10,16 @@
 use crate::cidr::Cidr;
 use crate::error::{Error, Result};
 use crate::model::{Access, NetworkPolicy, NetworkRule, Protocol};
+use std::net::Ipv4Addr;
 
 /// Largest number of allow rules, and of deny rules, that OpenVMM accepts.
 const MAX_RULES: usize = 256;
 
 /// Returns the OpenVMM options that enforce `policy`.
 ///
-/// Without a network section, or when egress is denied without allow rules and ingress is
-/// denied, no network device is attached. Otherwise the portable profile applies the egress
-/// posture with ingress and host loopback denied; other postures are rejected before
+/// Without a network section, or when egress and both inbound paths are denied without egress
+/// allow rules, no network device is attached. Otherwise the portable profile applies the egress
+/// and host-loopback postures with ordinary ingress denied; other postures are rejected before
 /// provisioning by the backend's capabilities.
 pub(crate) fn network_arguments(
     policy: Option<&NetworkPolicy>,
@@ -28,9 +29,11 @@ pub(crate) fn network_arguments(
         return Ok(Vec::new());
     };
     let egress = &policy.egress;
+    let host_loopback = policy.ingress.host_loopback.unwrap_or(Access::Deny);
     if egress.default == Access::Deny
         && egress.allow.is_empty()
         && policy.ingress.default == Access::Deny
+        && host_loopback == Access::Deny
     {
         return Ok(Vec::new());
     }
@@ -44,7 +47,7 @@ pub(crate) fn network_arguments(
         "--network-ingress",
         "deny",
         "--host-loopback",
-        "deny",
+        host_loopback.as_str(),
     ]
     .map(str::to_owned)
     .to_vec();
@@ -75,6 +78,61 @@ pub(crate) fn network_arguments(
         }
     }
     Ok(arguments)
+}
+
+/// Returns whether a deny rule selects any address in the configured guest network.
+pub(crate) fn deny_rules_overlap_guest_network(
+    policy: &NetworkPolicy,
+    guest_network: &str,
+) -> Result<bool> {
+    let Some((guest_address, prefix)) = guest_network.split_once('/') else {
+        return Err(Error::policy_validation(
+            "the configured guest network is invalid",
+        ));
+    };
+    let guest_address = guest_address
+        .parse::<Ipv4Addr>()
+        .map_err(|_| Error::policy_validation("the configured guest network is invalid"))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .ok()
+        .filter(|prefix| (1..=30).contains(prefix))
+        .ok_or_else(|| Error::policy_validation("the configured guest network is invalid"))?;
+    let mask = u32::MAX << (32 - u32::from(prefix));
+    let guest_network = Cidr::parse(&format!(
+        "{}/{}",
+        Ipv4Addr::from(u32::from(guest_address) & mask),
+        prefix
+    ))
+    .map_err(Error::policy_validation)?;
+
+    for rule in &policy.egress.deny {
+        if rule.to.is_empty() {
+            return Ok(true);
+        }
+        for peer in &rule.to {
+            let destination = Cidr::parse(&peer.cidr).map_err(Error::policy_validation)?;
+            let exclusions = peer
+                .except
+                .iter()
+                .map(|value| Cidr::parse(value).map_err(Error::policy_validation))
+                .collect::<Result<Vec<_>>>()?;
+            let remainder = destination
+                .subtract(&exclusions, MAX_RULES)
+                .ok_or_else(|| {
+                    Error::policy_validation(
+                        "network.egress.deny expands beyond the OpenVMM rule limit",
+                    )
+                })?;
+            if remainder
+                .iter()
+                .any(|network| network.contains(guest_network) || guest_network.contains(*network))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Appends the OpenVMM rules equivalent to `rule`.
@@ -218,12 +276,53 @@ mod tests {
                 "deny",
             ]
         );
+        let mut host_loopback = NetworkPolicy::egress(Access::Allow);
+        host_loopback.ingress.host_loopback = Some(Access::Allow);
+        let arguments = network_arguments(Some(&host_loopback), "10.0.0.2/24").unwrap();
+        assert!(has_pair(&arguments, "--network-ingress", "deny"));
+        assert!(has_pair(&arguments, "--host-loopback", "allow"));
         // Deny rules under a deny default change nothing, so no device is attached.
         let denied = policy(EgressPolicy::new(Access::Deny).with_deny(NetworkRule::to("1.2.3.4")));
         assert!(
             network_arguments(Some(&denied), "10.0.0.2/24")
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn deny_rules_report_guest_network_overlap_after_exclusions() {
+        let denied = |rule| NetworkPolicy {
+            egress: EgressPolicy::new(Access::Allow).with_deny(rule),
+            ..NetworkPolicy::deny_all()
+        };
+        for rule in [
+            NetworkRule::default(),
+            NetworkRule::to("10.0.0.0/8"),
+            NetworkRule::to("10.0.0.0/24"),
+            NetworkRule::to("10.0.0.2"),
+        ] {
+            assert!(deny_rules_overlap_guest_network(&denied(rule), "10.0.0.2/24").unwrap());
+        }
+        assert!(
+            !deny_rules_overlap_guest_network(
+                &denied(NetworkRule::to("10.0.1.0/24")),
+                "10.0.0.2/24"
+            )
+            .unwrap()
+        );
+        assert!(
+            !deny_rules_overlap_guest_network(
+                &denied(NetworkRule {
+                    to: vec![NetworkPeer {
+                        cidr: "0.0.0.0/0".to_owned(),
+                        except: vec!["10.0.0.0/24".to_owned()],
+                    }],
+                    ports: Vec::new(),
+                }),
+                "10.0.0.2/24"
+            )
+            .unwrap()
         );
     }
 
