@@ -16,6 +16,7 @@ legacy_runner_directory=${HOME}/actions-runner
 runner_directory=/opt/nvx-runner
 runner_directory_is_default=true
 runner_name=
+extra_runner_labels=
 runner_service_account=nvx-runner
 runner_token=
 runner_package_directory=
@@ -30,11 +31,12 @@ usage() {
     cat <<EOF
 Usage: $0 --backend kvm|mshv [options]
 
-Bootstrap a Linux Azure VM for NVX GitHub Actions jobs.
+Bootstrap a Linux host for NVX GitHub Actions jobs.
 
 Options:
     --backend BACKEND       Virtualization backend: kvm or mshv
     --runner-name NAME      Register a runner with this unique name
+    --extra-runner-labels LABELS  Add labels to the required platform labels
     --repository-url URL    Runner repository URL (default: ${repository_url})
     --runner-directory PATH Runner installation path (default: ${runner_directory})
     --runner-token-stdin    Read a short-lived registration token from stdin
@@ -199,6 +201,27 @@ validate_runner_name() {
             die "invalid runner name: $1"
             ;;
     esac
+}
+
+append_runner_labels() {
+    case "$1" in
+        '' | ,* | *, | *,,* | *[!A-Za-z0-9_,.-]*)
+            die "invalid additional runner labels: $1"
+            ;;
+    esac
+    remaining=$1
+    seen_labels=$expected_runner_labels
+    while :; do
+        label=${remaining%%,*}
+        lowercase_label=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+        case ",${seen_labels}," in
+            *,"${lowercase_label}",*) die "duplicate runner label: $label" ;;
+        esac
+        expected_runner_labels=${expected_runner_labels},${label}
+        seen_labels=${seen_labels},${lowercase_label}
+        [ "$remaining" != "$label" ] || break
+        remaining=${remaining#*,}
+    done
 }
 
 run_as_root() {
@@ -909,6 +932,13 @@ while [ "$#" -gt 0 ]; do
             configure_runner=true
             shift 2
             ;;
+        --extra-runner-labels)
+            [ "$#" -ge 2 ] || die "--extra-runner-labels requires a value"
+            extra_runner_labels=$2
+            [ -n "$extra_runner_labels" ] ||
+                die "--extra-runner-labels requires a nonempty value"
+            shift 2
+            ;;
         --repository-url)
             [ "$#" -ge 2 ] || die "--repository-url requires a value"
             repository_url=$2
@@ -957,6 +987,9 @@ runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
 runner_sccache_dir=${runner_directory}/_work/_sccache
 runner_labels_file=${runner_directory}/.nvx-labels
 expected_runner_labels=linux,${backend},virtual-machine
+if [ -n "$extra_runner_labels" ]; then
+    append_runner_labels "$extra_runner_labels"
+fi
 
 if [ "$check_only" = false ]; then
     install_packages
