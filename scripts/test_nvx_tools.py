@@ -3295,6 +3295,32 @@ class CiConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported CI event"):
             ci.classify_ci_changes("workflow_dispatch", ["openvmm"])
 
+    def test_dockerignore_changes_select_guest_suites(self):
+        # The root .dockerignore shapes the guest Docker build context, so it
+        # must select the VMM suites and invalidate every guest cache key.
+        self.assertEqual(
+            ci.classify_ci_changes("pull_request", [".dockerignore"]),
+            ci.CiChanges(True, True, False, True),
+        )
+        self.assertEqual(
+            ci.classify_ci_changes("push", [".dockerignore"]),
+            ci.CiChanges(True, True, True, True),
+        )
+        guest_action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        for match in re.finditer(
+            r"^\s+([A-Z_]+)_INPUT_HASH: \$\{\{ hashFiles\((.+)\) \}\}$",
+            guest_action,
+            re.MULTILINE,
+        ):
+            with self.subTest(guest=match.group(1)):
+                self.assertIn("'.dockerignore'", match.group(2))
+
     def test_ci_change_classification_covers_each_suite_input(self):
         github = BuildConstants.REPO_ROOT / ".github"
         tools = BuildConstants.REPO_ROOT / "scripts" / "nvx_tools"

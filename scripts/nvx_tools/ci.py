@@ -117,7 +117,7 @@ CI_TEST_INPUT_PATHS = re.compile(
     r"sccache|setup-curl|validate-runner)/|"
     r"scripts/nvx\.py$|scripts/nvx_tools/|scripts/setup/|"
     r"kernel/|alpine/|guest/|ubuntu/|"
-    r"docker/Dockerfile$|SOURCE-MANIFEST\.json$|rust-toolchain\.toml$)"
+    r"docker/Dockerfile$|\.dockerignore$|SOURCE-MANIFEST\.json$|rust-toolchain\.toml$)"
 )
 # Inputs of the OpenVMM unit and documentation tests: the pinned revision, the
 # Rust release, the runner setup, and the code and workflow that run them.
@@ -137,7 +137,7 @@ OPENVMM_VMM_TEST_INPUT_PATHS = re.compile(
     r"scripts/nvx\.py$|"
     r"scripts/nvx_tools/"
     r"(__init__|build|build_config|build_constants|ci|common|guests)\.py$|"
-    r"SOURCE-MANIFEST\.json$|docker/Dockerfile$|kernel/|guest/(alpine|common)/)"
+    r"SOURCE-MANIFEST\.json$|docker/Dockerfile$|\.dockerignore$|kernel/|guest/(alpine|common)/)"
 )
 
 
