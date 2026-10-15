@@ -5,9 +5,10 @@
 """Check relative links, images, and anchors in tracked Markdown files.
 
 Every relative link or image target must exist in the working tree, and every
-anchor must match a heading slug, using GitHub's rules, in the target file. Code
-spans and fenced code blocks are ignored. Files under ``openvmm/`` are vendored
-and skipped.
+anchor must match a heading slug in the target file, using GitHub's rules.
+Inline links, reference-style definitions, and HTML ``href`` and ``src``
+attributes are checked. Fenced code blocks and code spans are ignored. Files
+under ``openvmm/`` are vendored and skipped.
 """
 
 from __future__ import annotations
@@ -21,19 +22,75 @@ from urllib.parse import unquote
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKIPPED_PREFIXES = ("openvmm/",)
 
-FENCE = re.compile(r"^\s*(```|~~~)")
-HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*#*\s*$")
-INLINE_CODE = re.compile(r"`[^`]*`")
-LINK = re.compile(r"!?\[[^\]]*\]\(\s*<?(?P<target>[^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+FENCE_OPEN = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})(?P<info>.*)$")
+FENCE_CLOSE = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})[ \t]*$")
+HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(?P<text>.+?)[ \t]*#*[ \t]*$")
+SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+# A code span opens and closes with the same run length and may span lines.
+CODE_SPAN = re.compile(r"(?<!`)(?P<run>`+)(?!`)(?P<body>.*?)(?<!`)(?P=run)(?!`)", re.S)
+INLINE_LINK = re.compile(
+    r"(?<!\\)!?\[(?P<label>(?:[^\[\]]|\[[^\]]*\])*)\]"
+    r"\([ \t\n]*<?(?P<target>[^)\s>]+)>?(?:[ \t\n]+\"[^\"]*\")?[ \t\n]*\)"
+)
+REFERENCE_DEFINITION = re.compile(
+    r"^ {0,3}\[(?P<label>[^\]\n]+)\]:[ \t]*<?(?P<target>[^\s>]+)>?", re.M
+)
 HTML_TARGET = re.compile(r"""\b(?:href|src)\s*=\s*["'](?P<target>[^"']+)["']""")
 HTML_ID = re.compile(r"""\b(?:id|name)\s*=\s*["'](?P<id>[^"']+)["']""")
+HTML_TAG = re.compile(r"<[^>]+>")
 SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
+def _blank(text: str) -> str:
+    """Return ``text`` with everything but its newlines replaced by spaces."""
+    return re.sub(r"[^\n]", " ", text)
+
+
+def _mask_fences(markdown: str) -> str:
+    """Blank fenced code blocks, keeping line numbers.
+
+    A fence closes only on its own character, with at least its opening length.
+    """
+    kept: list[str] = []
+    opening: tuple[str, int] | None = None
+    for line in markdown.split("\n"):
+        if opening is None:
+            match = FENCE_OPEN.match(line)
+            if match and not (match["run"][0] == "`" and "`" in match["info"]):
+                opening = (match["run"][0], len(match["run"]))
+                kept.append("")
+                continue
+            kept.append(line)
+            continue
+        close = FENCE_CLOSE.match(line)
+        if close and close["run"][0] == opening[0] and len(close["run"]) >= opening[1]:
+            opening = None
+        kept.append("")
+    return "\n".join(kept)
+
+
+def _mask_code_spans(markdown: str) -> str:
+    return CODE_SPAN.sub(lambda match: _blank(match.group(0)), markdown)
+
+
+def _line_of(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
 def github_slug(heading: str) -> str:
-    """Return the anchor GitHub generates for a heading's text."""
-    text = INLINE_CODE.sub(lambda match: match.group(0).strip("`"), heading)
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    """Return the anchor GitHub generates for a heading's rendered text."""
+    code: list[str] = []
+
+    def stash(match: re.Match[str]) -> str:
+        code.append(match["body"])
+        return f"\x00{len(code) - 1}\x00"
+
+    text = CODE_SPAN.sub(stash, heading)
+    text = INLINE_LINK.sub(lambda match: match["label"], text)
+    text = HTML_TAG.sub("", text)
+    text = text.replace("*", "")
+    text = re.sub(r"(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])", "", text)
+    text = re.sub(r"\x00(\d+)\x00", lambda match: code[int(match.group(1))], text)
     kept = [
         "-" if char == " " else char
         for char in text.strip().lower()
@@ -42,43 +99,54 @@ def github_slug(heading: str) -> str:
     return "".join(kept)
 
 
+def _headings(markdown: str) -> list[str]:
+    """Return the rendered text of each ATX and Setext heading, in order."""
+    masked = _mask_code_spans(_mask_fences(markdown)).split("\n")
+    raw = markdown.split("\n")
+    headings: list[str] = []
+    for index, line in enumerate(masked):
+        atx = HEADING.match(line)
+        if atx:
+            headings.append(HEADING.match(raw[index])["text"])  # type: ignore[index]
+            continue
+        if index == 0 or not SETEXT_UNDERLINE.match(line):
+            continue
+        if not masked[index - 1].strip():
+            continue
+        start = index
+        while (
+            start > 0
+            and masked[start - 1].strip()
+            and not HEADING.match(masked[start - 1])
+        ):
+            start -= 1
+        headings.append(" ".join(part.strip() for part in raw[start:index]))
+    return headings
+
+
 def anchors_in(markdown: str) -> set[str]:
-    """Return every anchor a Markdown document defines, including duplicate suffixes."""
+    """Return every anchor a document defines, with GitHub's duplicate suffixes."""
     anchors: set[str] = set()
-    seen: dict[str, int] = {}
-    in_fence = False
-    for line in markdown.splitlines():
-        if FENCE.match(line):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        heading = HEADING.match(line)
-        if heading:
-            slug = github_slug(heading.group("text"))
-            count = seen.get(slug, 0)
-            seen[slug] = count + 1
-            anchors.add(slug if count == 0 else f"{slug}-{count}")
-        anchors.update(HTML_ID.findall(line))
+    for heading in _headings(markdown):
+        slug = github_slug(heading)
+        candidate = slug
+        suffix = 1
+        while candidate in anchors:
+            candidate = f"{slug}-{suffix}"
+            suffix += 1
+        anchors.add(candidate)
+    anchors.update(HTML_ID.findall(_mask_code_spans(_mask_fences(markdown))))
     return anchors
 
 
 def targets_in(markdown: str) -> list[tuple[int, str]]:
-    """Return (line number, target) for each link outside code."""
+    """Return (line number, target) for each link, definition, and HTML target."""
+    masked = _mask_code_spans(_mask_fences(markdown))
     found: list[tuple[int, str]] = []
-    in_fence = False
-    for number, line in enumerate(markdown.splitlines(), start=1):
-        if FENCE.match(line):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        prose = INLINE_CODE.sub("", line)
-        for match in LINK.finditer(prose):
-            found.append((number, match.group("target")))
-        for match in HTML_TARGET.finditer(prose):
-            found.append((number, match.group("target")))
-    return found
+    for pattern in (INLINE_LINK, REFERENCE_DEFINITION, HTML_TARGET):
+        for match in pattern.finditer(masked):
+            found.append((_line_of(masked, match.start()), match["target"]))
+    return sorted(found)
 
 
 def _in_skipped_tree(path: Path) -> bool:

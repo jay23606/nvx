@@ -18,8 +18,12 @@ class GithubSlugTests(unittest.TestCase):
         )
         self.assertEqual(github_slug("3.2 Clock & time"), "32-clock--time")
 
-    def test_keeps_underscores_and_code_text(self) -> None:
+    def test_keeps_underscores_inside_words_and_in_code(self) -> None:
         self.assertEqual(github_slug("The `nvx_tools` module"), "the-nvx_tools-module")
+
+    def test_drops_emphasis_markers_from_rendered_text(self) -> None:
+        self.assertEqual(github_slug("_Setup_"), "setup")
+        self.assertEqual(github_slug("**Bold** and *italic*"), "bold-and-italic")
 
 
 class AnchorTests(unittest.TestCase):
@@ -27,9 +31,31 @@ class AnchorTests(unittest.TestCase):
         anchors = anchors_in("# Setup\n\n## Setup\n\n## Setup\n")
         self.assertEqual(anchors, {"setup", "setup-1", "setup-2"})
 
+    def test_generated_suffix_skips_a_slug_already_taken(self) -> None:
+        self.assertEqual(
+            anchors_in("# Setup\n# Setup\n# Setup-1\n"),
+            {"setup", "setup-1", "setup-1-1"},
+        )
+        self.assertEqual(
+            anchors_in("# Setup\n# Setup-1\n# Setup\n"),
+            {"setup", "setup-1", "setup-2"},
+        )
+
     def test_headings_inside_fences_do_not_count(self) -> None:
         anchors = anchors_in("```\n# Not a heading\n```\n\n# Real\n")
         self.assertEqual(anchors, {"real"})
+
+    def test_setext_headings_provide_anchors(self) -> None:
+        self.assertEqual(anchors_in("Setup\n=====\n\nMore\n---\n"), {"setup", "more"})
+
+    def test_setext_and_atx_duplicates_share_one_sequence(self) -> None:
+        self.assertEqual(anchors_in("# Setup\n\nSetup\n-----\n"), {"setup", "setup-1"})
+
+    def test_formatted_headings_use_their_rendered_text(self) -> None:
+        self.assertEqual(
+            anchors_in("## _Setup_\n\n## `nvx_tools` module\n"),
+            {"setup", "nvx_tools-module"},
+        )
 
 
 class TargetTests(unittest.TestCase):
@@ -40,6 +66,28 @@ class TargetTests(unittest.TestCase):
     def test_images_and_html_targets_are_found(self) -> None:
         text = '![diagram](img/a.png)\n<a href="other.md#x">x</a>\n'
         self.assertEqual(targets_in(text), [(1, "img/a.png"), (2, "other.md#x")])
+
+    def test_fence_closes_only_on_the_same_character_and_length(self) -> None:
+        text = "````\n```\n[example](missing.md)\n```\n````\n[real](real.md)\n"
+        self.assertEqual(targets_in(text), [(6, "real.md")])
+
+    def test_multi_backtick_code_spans_hide_links(self) -> None:
+        text = "`` `[example](missing.md)` ``\n\n[live](real.md)\n"
+        self.assertEqual(targets_in(text), [(3, "real.md")])
+
+    def test_multiline_link_labels_are_found(self) -> None:
+        text = "[draft or ready for\nreview](#draft-or-ready)\n"
+        self.assertEqual(targets_in(text), [(1, "#draft-or-ready")])
+
+    def test_reference_definitions_are_checked(self) -> None:
+        text = "See [guide][g], [Guide][], and [g].\n\n[g]: missing.md\n[G]: other.md\n"
+        self.assertEqual(
+            sorted(targets_in(text)),
+            [(3, "missing.md"), (4, "other.md")],
+        )
+
+    def test_undefined_reference_labels_are_not_links(self) -> None:
+        self.assertEqual(targets_in("[text][nope] and [other]\n"), [])
 
 
 if __name__ == "__main__":
