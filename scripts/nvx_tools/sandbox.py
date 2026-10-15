@@ -524,7 +524,7 @@ class SandboxLaunch:
             raise ScriptError(
                 f"duplicate sandbox layer role(s): {', '.join(duplicates)}"
             )
-        if len(self.layers) != 1:
+        if len(self.layers) != 1 or self.layers[0].role != "distro":
             raise ScriptError("a sandbox requires exactly one read-only distro layer")
         if not self.entrypoint.startswith("/") or any(
             character.isspace() for character in self.entrypoint

@@ -12594,6 +12594,18 @@ class SandboxTests(unittest.TestCase):
         distro = sandbox.SandboxLayer.parse(
             "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
         )
+        for role in ("runtime", "custom"):
+            # A saved launch is rebuilt from SandboxLayer values, so the check must
+            # hold for those too, not only for parsed --layer arguments.
+            saved = sandbox.SandboxLayer(
+                role=role,
+                path=Path(f"{role}.erofs"),
+                uuid="22222222-2222-2222-2222-222222222222",
+            )
+            with self.assertRaisesRegex(
+                common.ScriptError, "exactly one read-only distro"
+            ):
+                sandbox.SandboxLaunch(layers=(saved,), scratch=Path("scratch.ext4"))
         with self.assertRaisesRegex(common.ScriptError, "exactly one read-only distro"):
             sandbox.SandboxLaunch(layers=(), scratch=Path("scratch.ext4"))
         with self.assertRaisesRegex(common.ScriptError, "duplicate.*distro"):
