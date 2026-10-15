@@ -1030,7 +1030,7 @@ An MXC `StatefulSandboxBackend` adapter maps onto this crate as follows:
 | `policy.network_egress` rules | `EgressPolicy` rules, field for field |
 | `working_directory` | `ExecRequest::with_cwd(nvx::guest_path(...))`; a directory that the workload cannot enter ends with `Failed(WorkingDirectory)` |
 | `process.env`, `process.inheritDefaultEnv` | `ProcessSpec::env`, `None` when omitted, and `inherit_default_env`, or `ExecRequest::with_envs` and `with_inherit_default_env`; see [Environment](#environment) |
-| `runtimeConfig.networkProxy` | `ProvisionRequest::with_network_proxy` with the `agent` backend; see [Native proxy and forwarded ports](#native-proxy-and-forwarded-ports) |
+| `runtimeConfig.networkProxy` | `ProvisionRequest::with_network_proxy` with the `agent` backend; see [Native proxy and forwarded ports](#native-proxy-and-host-loopback) |
 
 A proof-of-concept MXC adapter, `nvx_backend`, implements this mapping. It
 runs each phase in its own process against a real VM and consumes exec pipes

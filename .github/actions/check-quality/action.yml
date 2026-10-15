@@ -31,6 +31,8 @@ runs:
         set -euo pipefail
         python -m ruff check scripts .github/specula
         python -m compileall -q .github/specula
+        python scripts/check_markdown_links.py
+        python -m unittest discover -s scripts -p "test_check_markdown_links.py"
         ${SHELLCHECK} --shell=sh \
           guest/common/init guest/alpine/nvx-container-enter \
           guest/alpine/nvx-container-launch \
