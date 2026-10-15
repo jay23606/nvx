@@ -27,7 +27,9 @@ FENCE_CLOSE = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})[ \t]*$")
 HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(?P<text>.+?)[ \t]*#*[ \t]*$")
 SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 # A code span opens and closes with the same run length and may span lines.
-CODE_SPAN = re.compile(r"(?<!`)(?P<run>`+)(?!`)(?P<body>.*?)(?<!`)(?P=run)(?!`)", re.S)
+CODE_SPAN = re.compile(
+    r"(?<!`)(?P<run>`+)(?!`)(?P<body>(?:(?!\n[ \t]*\n).)*?)(?<!`)(?P=run)(?!`)", re.S
+)
 INLINE_LINK = re.compile(
     r"(?<!\\)!?\[(?P<label>(?:[^\[\]]|\[[^\]]*\])*)\]"
     r"\([ \t\n]*<?(?P<target>[^)\s>]+)>?(?:[ \t\n]+\"[^\"]*\")?[ \t\n]*\)"

@@ -75,6 +75,10 @@ class TargetTests(unittest.TestCase):
         text = "`` `[example](missing.md)` ``\n\n[live](real.md)\n"
         self.assertEqual(targets_in(text), [(3, "real.md")])
 
+    def test_code_spans_do_not_cross_paragraphs(self) -> None:
+        text = "`unmatched\n\n[real](real.md)\n\n`other`\n"
+        self.assertEqual(targets_in(text), [(3, "real.md")])
+
     def test_multiline_link_labels_are_found(self) -> None:
         text = "[draft or ready for\nreview](#draft-or-ready)\n"
         self.assertEqual(targets_in(text), [(1, "#draft-or-ready")])
