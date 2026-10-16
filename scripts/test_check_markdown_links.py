@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import unittest
 
-from check_markdown_links import anchors_in, github_slug, targets_in
+from check_markdown_links import (
+    REPO_ROOT,
+    anchors_in,
+    check_target,
+    github_slug,
+    targets_in,
+)
 
 
 class GithubSlugTests(unittest.TestCase):
@@ -96,3 +102,34 @@ class TargetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParserRegressionTests(unittest.TestCase):
+    def test_parentheses_balance_inside_a_destination(self) -> None:
+        self.assertEqual(targets_in("[guide](guide(v2).md)\n"), [(1, "guide(v2).md")])
+
+    def test_titles_are_not_part_of_the_destination(self) -> None:
+        self.assertEqual(targets_in("[g](guide.md 'Guide')\n"), [(1, "guide.md")])
+        self.assertEqual(targets_in('[g](guide.md "Guide")\n'), [(1, "guide.md")])
+
+    def test_angle_bracketed_destinations_may_contain_spaces(self) -> None:
+        self.assertEqual(
+            targets_in("[g](<dir with space/g.md>)\n"), [(1, "dir with space/g.md")]
+        )
+
+    def test_images_nested_in_link_labels_are_checked(self) -> None:
+        found = targets_in("[![diagram](missing.png)](README.md)\n")
+        self.assertEqual(sorted(found), [(1, "README.md"), (1, "missing.png")])
+
+    def test_fences_indented_inside_list_items_are_recognized(self) -> None:
+        text = "- item\n\n    ```\n    [example](missing.md)\n\n    ```\n\n[live](real.md)\n"
+        self.assertEqual(targets_in(text), [(8, "real.md")])
+
+    def test_query_strings_are_not_part_of_the_path(self) -> None:
+        self.assertIsNone(check_target(REPO_ROOT / "README.md", 1, "README.md?plain=1"))
+
+    def test_html_entities_in_headings_are_decoded(self) -> None:
+        self.assertEqual(anchors_in("# Build &amp; run\n"), {"build--run"})
+
+    def test_entities_inside_code_spans_stay_literal(self) -> None:
+        self.assertEqual(anchors_in("# `&amp;`\n"), {"amp"})
