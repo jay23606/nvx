@@ -288,11 +288,15 @@ class OpenvmmProcess:
         """
         if not self._finished and self.process.poll() is None:
             terminate(self.process)
-        if not self._log.closed:
-            self._drain_available()
-        self._close_log()
-        self._interaction.close()
-        self._finished = True
+        try:
+            # The reader queues its last chunks while the interaction shuts down, so
+            # drain only after it has stopped, and release the transcript either way.
+            self._interaction.close()
+            if not self._log.closed:
+                self._drain_available()
+        finally:
+            self._close_log()
+            self._finished = True
 
     def _drain_available(self) -> None:
         """Keep the output still queued; failure paths only, so no scan."""
