@@ -8,6 +8,7 @@ import ctypes
 import hashlib
 import json
 import os
+import queue
 import signal
 import socket
 import subprocess
@@ -2652,6 +2653,28 @@ class ExecutorCloseTests(unittest.TestCase):
                         )
                     else:
                         os.kill(int(pid), signal.SIGKILL)
+
+    def test_reader_closes_its_stream_when_the_output_ends(self):
+        client = ExecutorClient.__new__(ExecutorClient)
+        client._stdout = MagicMock()
+        client._stdout.readline.side_effect = [b'{"ok": true}\n', b""]
+        client._responses = queue.Queue()
+        client._abandoned = False
+        client._read_responses()
+        client._stdout.close.assert_called_once_with()
+        self.assertEqual(client._responses.get_nowait(), b'{"ok": true}\n')
+        self.assertIsNone(client._responses.get_nowait())
+
+    def test_abandoned_reader_drains_output_without_retaining_it(self):
+        client = ExecutorClient.__new__(ExecutorClient)
+        client._stdout = MagicMock()
+        client._stdout.readline.side_effect = [b"late\n", b"later\n", b""]
+        client._responses = queue.Queue()
+        client._abandoned = True
+        client._read_responses()
+        client._stdout.close.assert_called_once_with()
+        self.assertIsNone(client._responses.get_nowait())
+        self.assertTrue(client._responses.empty())
 
 
 if __name__ == "__main__":
