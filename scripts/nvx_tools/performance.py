@@ -2272,9 +2272,21 @@ def _committed_results(top: Path, revision: str, relative: str) -> list[Result]:
     if shown.returncode != 0:
         return []
     with tempfile.TemporaryDirectory() as temporary:
-        path = Path(temporary) / "history.csv"
+        # Keep the basename: a legacy CSV takes its platform from the file name.
+        path = Path(temporary) / Path(relative).name
         path.write_bytes(shown.stdout)
         return read_results(path)
+
+
+def _dimension_counts(
+    top: Path,
+    revision: str,
+    relative: str,
+) -> Counter[tuple[str, int, int, str]]:
+    return Counter(
+        _dimension_key(result, "")
+        for result in _committed_results(top, revision, relative)
+    )
 
 
 def _reset_dimensions_since(
@@ -2301,27 +2313,25 @@ def _reset_dimensions_since(
         raise PerformanceError(
             f"result commit {commit} is not an ancestor of the target history"
         )
+    # Compare each commit with its own parents: a side branch forked before
+    # ``commit`` can hold fewer rows than ``commit`` without having reset them.
     later = _git(
         top,
         "log",
         "--reverse",
-        "--format=%H",
+        "--full-history",
+        "--format=%H %P",
         f"{commit}..HEAD",
         "--",
         relative,
-    ).split()
-    previous = Counter(
-        _dimension_key(result, "")
-        for result in _committed_results(top, commit, relative)
-    )
+    ).splitlines()
     resets: set[tuple[str, int, int, str]] = set()
-    for revision in later:
-        current = Counter(
-            _dimension_key(result, "")
-            for result in _committed_results(top, revision, relative)
-        )
-        resets.update(key for key, count in previous.items() if current[key] < count)
-        previous = current
+    for line in later:
+        revision, *parents = line.split()
+        current = _dimension_counts(top, revision, relative)
+        for parent in parents:
+            before = _dimension_counts(top, parent, relative)
+            resets.update(key for key, count in before.items() if current[key] < count)
     return resets
 
 
