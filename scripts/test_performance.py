@@ -2449,6 +2449,60 @@ class PerformanceTests(unittest.TestCase):
                 set(),
             )
 
+    def test_reset_check_ignores_a_merged_branch_that_predates_an_earlier_reset(self):
+        # Dev resets latency before measurement A. A branch forked before that reset
+        # keeps the old latency rows and adds throughput; merging it into dev keeps the
+        # reset, so the merge drops latency relative to that branch. The reset preceded A,
+        # so A's latency row must not be discarded.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            history_file = repo / "data" / "linux-kvm.csv"
+            performance.write_results(
+                history_file,
+                [performance.Result("s0", "latency", "ms", "lower", 10.0)],
+            )
+            git("add", "data")
+            git("commit", "-q", "-m", "seed")
+            main = git("rev-parse", "--abbrev-ref", "HEAD")
+            git("checkout", "-q", "-b", "branch")
+            performance.write_results(
+                history_file,
+                [
+                    performance.Result("s0", "latency", "ms", "lower", 12.0),
+                    performance.Result("b", "throughput", "MB/s", "higher", 5.0),
+                ],
+            )
+            git("commit", "-q", "-am", "branch work")
+            git("checkout", "-q", main)
+            performance.write_results(history_file, [])
+            git("commit", "-q", "-am", "reset latency before the measurement")
+            git("commit", "-q", "--allow-empty", "-m", "measured")
+            measured = git("rev-parse", "HEAD")
+            git("merge", "-q", "--no-commit", "--no-ff", "-X", "ours", "branch")
+            performance.write_results(
+                history_file,
+                [performance.Result("b", "throughput", "MB/s", "higher", 5.0)],
+            )
+            git("commit", "-q", "-am", "merge branch")
+
+            self.assertEqual(
+                performance._reset_dimensions_since(repo, history_file, measured),
+                set(),
+            )
+
     def test_persist_drops_rows_measured_before_a_later_history_reset(self):
         # A row measured before a commit that reset its metric must not refill the reset
         # series, or nine post-reset rows would already gate the metric. Unaffected metrics

@@ -2330,9 +2330,34 @@ def _reset_dimensions_since(
         revision, *parents = line.split()
         current = _dimension_counts(top, revision, relative)
         for parent in parents:
+            # A branch that neither predates nor follows the measurement can drop rows
+            # that were already reset before it, so only the measurement's line counts.
+            if not _on_measurement_line(top, parent, commit):
+                continue
             before = _dimension_counts(top, parent, relative)
             resets.update(key for key, count in before.items() if current[key] < count)
     return resets
+
+
+def _on_measurement_line(top: Path, revision: str, measured: str) -> bool:
+    """Return whether ``revision`` came before ``measured`` or was built on it."""
+    for ancestor, descendant in ((revision, measured), (measured, revision)):
+        check = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(top),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            return True
+    return False
 
 
 def _without_reset_rows(
