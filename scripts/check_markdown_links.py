@@ -209,6 +209,11 @@ def _opening_bracket(masked: str, close: int) -> int | None:
     return None
 
 
+def _unescape(destination: str) -> str:
+    """Remove Markdown backslash escapes before ASCII punctuation."""
+    return re.sub(r"\\([!-/:-@\[-`{-~])", r"\1", destination)
+
+
 def _inline_targets(masked: str) -> list[tuple[int, str]]:
     """Return (line, destination) for each inline link, including images nested in labels."""
     found: list[tuple[int, str]] = []
@@ -221,7 +226,7 @@ def _inline_targets(masked: str) -> list[tuple[int, str]]:
         opener = _opening_bracket(masked, index)
         if destination is None or opener is None:
             continue
-        found.append((_line_of(masked, opener), destination))
+        found.append((_line_of(masked, opener), _unescape(destination)))
     return found
 
 
@@ -230,9 +235,10 @@ def targets_in(markdown: str) -> list[tuple[int, str]]:
     masked = _mask_code_spans(_mask_fences(markdown))
     found: list[tuple[int, str]] = []
     found.extend(_inline_targets(masked))
-    for pattern in (REFERENCE_DEFINITION, HTML_TARGET):
-        for match in pattern.finditer(masked):
-            found.append((_line_of(masked, match.start()), match["target"]))
+    for match in REFERENCE_DEFINITION.finditer(masked):
+        found.append((_line_of(masked, match.start()), _unescape(match["target"])))
+    for match in HTML_TARGET.finditer(masked):
+        found.append((_line_of(masked, match.start()), match["target"]))
     return sorted(found)
 
 

@@ -133,3 +133,17 @@ class ParserRegressionTests(unittest.TestCase):
 
     def test_entities_inside_code_spans_stay_literal(self) -> None:
         self.assertEqual(anchors_in("# `&amp;`\n"), {"amp"})
+
+
+class EscapeRegressionTests(unittest.TestCase):
+    def test_punctuation_escapes_in_inline_and_reference_destinations_are_decoded(
+        self,
+    ) -> None:
+        text = "[guide](guide\\(v2\\).md)\n\n[g]: guide\\(v2\\).md\n"
+        self.assertEqual(
+            sorted(targets_in(text)),
+            [(1, "guide(v2).md"), (3, "guide(v2).md")],
+        )
+
+    def test_html_attribute_backslashes_are_not_decoded(self) -> None:
+        self.assertEqual(targets_in('<a href="a\\(b.md">x</a>\n'), [(1, "a\\(b.md")])
