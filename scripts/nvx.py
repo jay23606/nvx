@@ -510,28 +510,13 @@ def _resolve_network_egress_rules(
     return compiled.allow, compiled.deny
 
 
-# Longest guest network prefix that host-loopback access accepts, as nvx-rs enforces it.
-MAX_HOST_LOOPBACK_PREFIX = 29
-
-
 def _extend_network_arguments(
     command: list[str],
     args: argparse.Namespace,
     network_egress_allow: tuple[str, ...],
     network_egress_deny: tuple[str, ...],
 ) -> None:
-    prefix = (args.net or "").partition("/")[2]
-    if (
-        args.host_loopback == "allow"
-        and prefix.isdecimal()
-        and int(prefix) > MAX_HOST_LOOPBACK_PREFIX
-    ):
-        # OpenVMM presents host peers to the guest inside its subnet, which a /30 cannot spare.
-        raise ScriptError(
-            "host-loopback access needs a guest network prefix of "
-            f"/{MAX_HOST_LOOPBACK_PREFIX} or shorter, which leaves an address at which "
-            "OpenVMM presents host peers to the guest"
-        )
+    sandbox_lifecycle.require_host_loopback_prefix(args.net, args.host_loopback)
     if args.net is not None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
     if args.network_egress is not None:
