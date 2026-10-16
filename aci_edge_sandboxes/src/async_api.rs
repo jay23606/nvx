@@ -244,7 +244,17 @@ impl AsyncExecution {
             // Both streams drain while the outcome is awaited, so a timeout that closes
             // retained output can end either collector instead of waiting for end-of-stream.
             let stdout = spawn_output_collector(stdout)?;
-            let stderr = spawn_output_collector(stderr)?;
+            let stderr = match spawn_output_collector(stderr) {
+                Ok(stderr) => stderr,
+                Err(error) => {
+                    // Cancelling ends the workload's output, so the stdout collector can finish
+                    // rather than block on a stream that nothing else will drain.
+                    let _ = control.cancel();
+                    let _ = control.wait();
+                    let _ = join_output_collector(stdout);
+                    return Err(error);
+                }
+            };
             let outcome = control.wait();
             let stdout = join_output_collector(stdout)?;
             let stderr = join_output_collector(stderr)?;
