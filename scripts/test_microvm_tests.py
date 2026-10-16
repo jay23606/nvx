@@ -4377,6 +4377,23 @@ class MicrovmTests(unittest.TestCase):
                 self.assertEqual(process.output, b"LAST\n")
             self.assertEqual(log_path.read_bytes(), b"LAST\n")
 
+    def test_process_close_keeps_queued_output_when_interaction_close_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                interaction.return_value.close.side_effect = OSError("reader stuck")
+                queues.return_value.get_nowait.side_effect = [b"QUEUED\n", queue.Empty]
+                process = openvmm_process.OpenvmmProcess(["openvmm"], log_path)
+                with self.assertRaises(OSError):
+                    process.close()
+                self.assertEqual(process.output, b"QUEUED\n")
+            self.assertEqual(log_path.read_bytes(), b"QUEUED\n")
+
     def test_process_close_releases_resources_when_the_transcript_write_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
             log_path = Path(temporary) / "output.log"

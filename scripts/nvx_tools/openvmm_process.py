@@ -290,10 +290,13 @@ class OpenvmmProcess:
             terminate(self.process)
         try:
             # The reader queues its last chunks while the interaction shuts down, so
-            # drain only after it has stopped, and release the transcript either way.
-            self._interaction.close()
-            if not self._log.closed:
-                self._drain_available()
+            # drain only after it has stopped. Drain even if that shutdown fails, and
+            # release the transcript either way.
+            try:
+                self._interaction.close()
+            finally:
+                if not self._log.closed:
+                    self._drain_available()
         finally:
             self._close_log()
             self._finished = True
