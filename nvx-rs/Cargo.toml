@@ -20,13 +20,13 @@ name = "nvx"
 default = ["host"]
 # The host side: artifact discovery, launch, network and filesystem lowering, control sessions,
 # process and platform primitives, and the supervision of VM instances.
-host = ["serde", "dep:getrandom", "dep:serde_json", "dep:libc", "dep:windows-sys"]
+host = ["serde", "dep:getrandom", "dep:serde_json", "dep:nix", "dep:windows-sys"]
 # Stages the OpenVMM executable, guest kernel, and control initramfs at build time; see
 # `Artifacts::bundled`. The build script downloads the release pinned in `artifacts.json`, or
 # copies the release directory named by `NVX_BUNDLE_DIR`.
 bundled = ["host", "dep:sha2"]
 # Test doubles: the fake OpenVMM of `testing::fake_openvmm` and its `nvx-fake-openvmm` binary.
-testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:libc", "dep:windows-sys"]
+testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:nix", "dep:windows-sys"]
 # The serde form of `Hypervisor`. The `host` feature enables it.
 serde = ["dep:serde"]
 # The programs that run in Linux guests: the `guest` module and the `nvx-*` guest binaries. Build
@@ -37,9 +37,6 @@ guest = ["dep:nix", "dep:getrandom"]
 getrandom = { version = "0.4", optional = true }
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }
-
-[target.'cfg(unix)'.dependencies]
-libc = { version = "0.2.160", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", optional = true, features = [
@@ -52,7 +49,8 @@ windows-sys = { version = "0.61", optional = true, features = [
     "Win32_System_Threading",
 ] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# The host and the fake OpenVMM also build on Unix hosts other than Linux, such as macOS.
+[target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", default-features = false, optional = true, features = [
     "fs",
     "ioctl",
@@ -101,13 +99,6 @@ doc = false
 test = false
 
 [[bin]]
-name = "nvx-port-io"
-path = "src/bin/nvx-port-io.rs"
-required-features = ["guest"]
-doc = false
-test = false
-
-[[bin]]
 name = "nvx-reseed"
 path = "src/bin/nvx-reseed.rs"
 required-features = ["guest"]
@@ -124,6 +115,20 @@ test = false
 [[bin]]
 name = "nvx-device-io"
 path = "src/bin/nvx-device-io.rs"
+required-features = ["guest"]
+doc = false
+test = false
+
+[[bin]]
+name = "nvx-managed-agent"
+path = "src/bin/nvx-managed-agent.rs"
+required-features = ["guest"]
+doc = false
+test = false
+
+[[bin]]
+name = "nvx-ingress"
+path = "src/bin/nvx-ingress.rs"
 required-features = ["guest"]
 doc = false
 test = false

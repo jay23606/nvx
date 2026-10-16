@@ -6,17 +6,16 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::io::{self, Seek, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::RwLock;
 
 use nix::errno::Errno;
-
-const PORT_IO_USAGE: &[u8] = b"usage: nvx-port-io read-generation-id DATA_PORT SELECT_PORT \
-[OUTPUT] | read-u8 PORT | write-u8 PORT VALUE\n";
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 
 /// Returns the path of the guest binary `name`.
 fn binary(name: &str) -> PathBuf {
@@ -26,8 +25,9 @@ fn binary(name: &str) -> PathBuf {
     PathBuf::from(match name {
         "nvx-console-pending" => env!("CARGO_BIN_EXE_nvx-console-pending"),
         "nvx-mmio-write" => env!("CARGO_BIN_EXE_nvx-mmio-write"),
-        "nvx-port-io" => env!("CARGO_BIN_EXE_nvx-port-io"),
         "nvx-reseed" => env!("CARGO_BIN_EXE_nvx-reseed"),
+        "nvx-managed-agent" => env!("CARGO_BIN_EXE_nvx-managed-agent"),
+        "nvx-ingress" => env!("CARGO_BIN_EXE_nvx-ingress"),
         "nvx-exit" => env!("CARGO_BIN_EXE_nvx-exit"),
         "nvx-device-io" => env!("CARGO_BIN_EXE_nvx-device-io"),
         _ => panic!("no guest binary {name}"),
@@ -244,44 +244,6 @@ fn mmio_write_reports_an_inaccessible_dev_mem() {
             format!("open /dev/mem: {}\n", errno.desc()).into_bytes()
         )
     );
-}
-
-#[test]
-fn port_io_usage() {
-    for arguments in [
-        &[][..],
-        &["read-u8"],
-        &["read-u8", "0x10000"],
-        &["write-u8", "1", "256"],
-        &["read-generation-id", "1"],
-        &["read-generation-id", "1", "2", "out", "extra"],
-    ] {
-        assert_eq!(
-            run("nvx-port-io", arguments),
-            (Some(2), Vec::new(), PORT_IO_USAGE.to_vec()),
-            "{arguments:?}"
-        );
-    }
-}
-
-#[test]
-fn port_io_reports_an_inaccessible_dev_port() {
-    for (arguments, read, write) in [
-        (&["read-u8", "0x70"][..], true, false),
-        (&["write-u8", "0x70", "0"], false, true),
-    ] {
-        let Some(errno) = device_error("/dev/port", read, write) else {
-            return;
-        };
-        assert_eq!(
-            run("nvx-port-io", arguments),
-            (
-                Some(1),
-                Vec::new(),
-                format!("nvx-port-io: open /dev/port: {}\n", errno.desc()).into_bytes()
-            )
-        );
-    }
 }
 
 #[test]
@@ -561,4 +523,434 @@ fn device_io_exits_255_when_it_cannot_print() {
     // With inherited SIG_IGN, write reports EPIPE and the tool returns its output-failure status.
     let (status, stderr) = run_to_ignoring_sigpipe("nvx-device-io", arguments, broken_pipe());
     assert_eq!((status.code(), stderr), (Some(255), Vec::new()));
+}
+
+fn helper_config(flags: u16, cwd: &[u8], environment: &[&[u8]]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&flags.to_le_bytes());
+    bytes.extend_from_slice(&(environment.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&(cwd.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(cwd);
+    for entry in environment {
+        bytes.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(entry);
+    }
+    bytes
+}
+
+fn run_agent_helper(
+    config: &[u8],
+    workload: &[&OsStr],
+    directory: Option<&Path>,
+    environment: &[(&str, &str)],
+) -> Output {
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(config).unwrap();
+    file.rewind().unwrap();
+    let fd = file.as_raw_fd();
+    // The helper inherits the descriptor, and closes it before it executes the workload.
+    fcntl(&file, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+    let mut command = Command::new(binary("nvx-managed-agent"));
+    command
+        .arg("--exec-config-fd")
+        .arg(fd.to_string())
+        .arg("--")
+        .args(workload)
+        .env_clear();
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    output_of(command.stdout(Stdio::piped()))
+}
+
+#[test]
+fn managed_agent_helper_round_trips_environment_and_cwd() {
+    const CWD_PRESENT: u16 = 1;
+    const ENVIRONMENT_PRESENT: u16 = 2;
+    const INHERIT_DEFAULT_ENV: u16 = 4;
+    let env = OsStr::new("/usr/bin/env");
+    let pwd = OsStr::new("/bin/pwd");
+
+    let output = run_agent_helper(
+        &helper_config(0, &[], &[]),
+        &[env],
+        None,
+        &[("BASE", "inherited"), ("NVX_EXEC_CONFIG_FD", "synthetic")],
+    );
+    assert_eq!((output.status.code(), output.stderr), (Some(0), Vec::new()));
+    let lines: std::collections::BTreeSet<_> = output.stdout.split(|&byte| byte == b'\n').collect();
+    assert!(lines.contains(b"BASE=inherited".as_slice()));
+    assert!(lines.contains(b"PWD=/".as_slice()));
+    assert!(
+        !output
+            .stdout
+            .windows(b"NVX_EXEC_CONFIG_FD".len())
+            .any(|window| window == b"NVX_EXEC_CONFIG_FD")
+    );
+
+    let output = run_agent_helper(
+        &helper_config(ENVIRONMENT_PRESENT, &[], &[]),
+        &[env],
+        None,
+        &[("BASE", "inherited"), ("NVX_EXEC_CONFIG_FD", "synthetic")],
+    );
+    assert_eq!(
+        (output.status.code(), output.stdout, output.stderr),
+        (Some(0), Vec::new(), Vec::new())
+    );
+
+    let output = run_agent_helper(
+        &helper_config(CWD_PRESENT | ENVIRONMENT_PRESENT, b"/tmp", &[]),
+        &[pwd],
+        None,
+        &[],
+    );
+    assert_eq!(
+        (output.status.code(), output.stdout, output.stderr),
+        (Some(0), b"/tmp\n".to_vec(), Vec::new())
+    );
+
+    let output = run_agent_helper(
+        &helper_config(
+            ENVIRONMENT_PRESENT | INHERIT_DEFAULT_ENV,
+            &[],
+            &[b"VALUE=layered"],
+        ),
+        &[env],
+        None,
+        &[("BASE", "inherited"), ("NVX_EXEC_CONFIG_FD", "synthetic")],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let lines: std::collections::BTreeSet<_> = output.stdout.split(|&byte| byte == b'\n').collect();
+    assert!(lines.contains(b"BASE=inherited".as_slice()));
+    assert!(lines.contains(b"VALUE=layered".as_slice()));
+    assert!(
+        !output
+            .stdout
+            .windows(b"NVX_EXEC_CONFIG_FD".len())
+            .any(|window| window == b"NVX_EXEC_CONFIG_FD")
+    );
+
+    let output = run_agent_helper(
+        &helper_config(
+            CWD_PRESENT | ENVIRONMENT_PRESENT,
+            b"/tmp",
+            &[b"PWD=/caller"],
+        ),
+        &[env],
+        None,
+        &[],
+    );
+    assert_eq!(
+        (output.status.code(), output.stdout, output.stderr),
+        (Some(0), b"PWD=/caller\n".to_vec(), Vec::new())
+    );
+}
+
+#[test]
+fn managed_agent_helper_keeps_requested_pwd_and_reports_unusable_cwd() {
+    const CWD_PRESENT: u16 = 1;
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("a/b");
+    let second = directory.path().join("a/c");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    std::os::unix::fs::symlink(directory.path().join("a"), directory.path().join("link")).unwrap();
+    let cases = [
+        (directory.path().join("a/b/."), first.clone()),
+        (directory.path().join("a/b/../c"), second),
+        (directory.path().join("a//b"), first.clone()),
+        (PathBuf::from(format!("{}/", first.display())), first),
+        (
+            directory.path().join("link/b"),
+            directory.path().join("link/b"),
+        ),
+    ];
+    for (requested, expected) in cases {
+        let output = run_agent_helper(
+            &helper_config(CWD_PRESENT, requested.as_os_str().as_bytes(), &[]),
+            &[OsStr::new("/usr/bin/env")],
+            None,
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(0), "{requested:?}");
+        let expected = [b"PWD=".as_slice(), expected.as_os_str().as_bytes()].concat();
+        assert!(
+            output
+                .stdout
+                .split(|&byte| byte == b'\n')
+                .any(|line| line == expected),
+            "{requested:?}: {:?}",
+            output.stdout
+        );
+    }
+
+    let missing = directory.path().join("missing");
+    let output = run_agent_helper(
+        &helper_config(CWD_PRESENT, missing.as_os_str().as_bytes(), &[]),
+        &[OsStr::new("/bin/true")],
+        None,
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(125));
+    assert!(output.stdout.is_empty());
+    assert!(
+        output
+            .stderr
+            .windows(b"cannot use working directory".len())
+            .any(|window| window == b"cannot use working directory")
+    );
+}
+
+#[test]
+fn managed_agent_helper_accepts_large_exact_environment() {
+    const ENVIRONMENT_PRESENT: u16 = 2;
+    let entries: Vec<Vec<u8>> = (0..12)
+        .map(|index| {
+            let mut entry = format!("KEY{index}=").into_bytes();
+            entry.extend(std::iter::repeat_n(b'x', 4000));
+            entry
+        })
+        .collect();
+    let references: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+    let output = run_agent_helper(
+        &helper_config(ENVIRONMENT_PRESENT, &[], &references),
+        &[OsStr::new("/usr/bin/env")],
+        None,
+        &[],
+    );
+    assert_eq!((output.status.code(), output.stderr), (Some(0), Vec::new()));
+    let expected: Vec<u8> = entries
+        .iter()
+        .flat_map(|entry| entry.iter().copied().chain(std::iter::once(b'\n')))
+        .collect();
+    assert_eq!(output.stdout, expected);
+}
+
+#[test]
+fn managed_agent_helper_defensively_rejects_bad_configuration() {
+    const CWD_PRESENT: u16 = 1;
+    const ENVIRONMENT_PRESENT: u16 = 2;
+    const CWD_ENTERED: u16 = 0x8000;
+    let workload = [OsStr::new("/bin/pwd")];
+    for config in [
+        helper_config(CWD_PRESENT, b".", &[]),
+        helper_config(CWD_PRESENT | CWD_ENTERED, b"/", &[]),
+        helper_config(ENVIRONMENT_PRESENT, &[], &[b"NO_EQUALS"]),
+        helper_config(ENVIRONMENT_PRESENT, &[], &[b"=value"]),
+        helper_config(ENVIRONMENT_PRESENT, &[], &[b"KEY=embedded\0nul"]),
+    ] {
+        let output = run_agent_helper(&config, &workload, None, &[]);
+        assert_eq!(output.status.code(), Some(125), "{config:?}");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn managed_agent_helper_keeps_an_entered_directory() {
+    const CWD_ENTERED: u16 = 0x8000;
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_agent_helper(
+        &helper_config(CWD_ENTERED, &[], &[]),
+        &[OsStr::new("/bin/pwd")],
+        Some(directory.path()),
+        &[("BASE", "inherited")],
+    );
+    let expected = [directory.path().as_os_str().as_bytes(), b"\n"].concat();
+    assert_eq!(
+        (output.status.code(), output.stdout, output.stderr),
+        (Some(0), expected, Vec::new())
+    );
+}
+
+#[test]
+fn managed_agent_helper_closes_its_internal_descriptor() {
+    const CWD_ENTERED: u16 = 0x8000;
+    let script = OsStr::new(r#"test ! -e "/proc/self/fd/$1""#);
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&helper_config(CWD_ENTERED, &[], &[]))
+        .unwrap();
+    file.rewind().unwrap();
+    let fd = file.as_raw_fd();
+    // The helper deliberately inherits this descriptor.
+    fcntl(&file, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+    let output = output_of(
+        Command::new(binary("nvx-managed-agent"))
+            .args([
+                OsStr::new("--exec-config-fd"),
+                OsStr::new(&fd.to_string()),
+                OsStr::new("--"),
+                OsStr::new("/bin/sh"),
+                OsStr::new("-c"),
+                script,
+                OsStr::new("sh"),
+                OsStr::new(&fd.to_string()),
+            ])
+            .stdout(Stdio::piped()),
+    );
+    assert_eq!(
+        (output.status.code(), output.stdout, output.stderr),
+        (Some(0), Vec::new(), Vec::new())
+    );
+}
+
+#[test]
+fn managed_agent_bad_helper_syntax_exits_125() {
+    for arguments in [
+        &[][..],
+        &["--exec-config-fd"],
+        &["--exec-config-fd", "-1", "--", "/bin/true"],
+        &["--exec-config-fd", "0", "--", "bin/true"],
+    ] {
+        assert_eq!(
+            run("nvx-managed-agent", arguments).0,
+            Some(125),
+            "{arguments:?}"
+        );
+    }
+}
+
+/// The header line of the kernel's socket tables, which `nvx-ingress` skips.
+const INGRESS_TABLE_HEADER: &str =
+    "  sl  local_address rem_address st tx rx tr tm retr uid timeout inode\n";
+
+/// Renders `address` as the kernel's socket tables do: each 32-bit word in hexadecimal, as it
+/// lies in memory.
+fn ingress_kernel_address(address: std::net::IpAddr) -> String {
+    let octets = match address {
+        std::net::IpAddr::V4(address) => address.octets().to_vec(),
+        std::net::IpAddr::V6(address) => address.octets().to_vec(),
+    };
+    octets
+        .chunks_exact(4)
+        .map(|word| format!("{:08X}", u32::from_ne_bytes(word.try_into().unwrap())))
+        .collect()
+}
+
+/// Returns row `index` of a socket table for an unconnected socket bound to `address` and `port`,
+/// in `state`, with `inode`.
+fn ingress_row(index: usize, address: &str, port: u16, state: u8, inode: u64) -> String {
+    let address: std::net::IpAddr = address.parse().unwrap();
+    let remote: std::net::IpAddr = match address {
+        std::net::IpAddr::V4(_) => "0.0.0.0".parse().unwrap(),
+        std::net::IpAddr::V6(_) => "::".parse().unwrap(),
+    };
+    format!(
+        "{index:4}: {}:{port:04X} {}:0000 {state:02X} \
+         00000000:00000000 00:00000000 00000000 0 0 {inode} \
+         2 0000000000000000\n",
+        ingress_kernel_address(address),
+        ingress_kernel_address(remote),
+    )
+}
+
+/// Writes snapshot `index` under `directory` for `nvx-ingress test`: its scan `time`, and the
+/// four socket tables, each with the `rows` named for it.
+fn write_ingress_snapshot(directory: &Path, index: u32, time: &[u8], rows: &[(&str, String)]) {
+    let root = directory.join(index.to_string());
+    fs::create_dir_all(root.join("net")).unwrap();
+    fs::write(root.join("time"), time).unwrap();
+    for table in ["tcp", "tcp6", "udp", "udp6"] {
+        let mut contents = INGRESS_TABLE_HEADER.to_owned();
+        for (_, row) in rows.iter().filter(|(name, _)| *name == table) {
+            contents.push_str(row);
+        }
+        fs::write(root.join("net").join(table), contents).unwrap();
+    }
+}
+
+#[test]
+fn ingress_test_mode_prints_the_golden_vector_from_prebuilt_binaries() {
+    let directory = tempfile::tempdir().unwrap();
+    write_ingress_snapshot(
+        directory.path(),
+        0,
+        b"0\n",
+        &[
+            ("tcp", ingress_row(0, "0.0.0.0", 8080, 0x0a, 1)),
+            ("tcp6", ingress_row(1, "fd00::a00:2", 8443, 0x0a, 2)),
+        ],
+    );
+    assert_eq!(
+        run(
+            "nvx-ingress",
+            [OsStr::new("test"), directory.path().as_os_str()]
+        ),
+        (
+            Some(0),
+            b"0 4e56584c0100000206011f90060220fb\n".to_vec(),
+            Vec::new(),
+        )
+    );
+}
+
+#[test]
+fn ingress_test_mode_preserves_udp_settling_between_snapshots() {
+    let directory = tempfile::tempdir().unwrap();
+    let rows = [("udp", ingress_row(0, "0.0.0.0", 7201, 0x07, 10))];
+    write_ingress_snapshot(directory.path(), 0, b"0\n", &rows);
+    write_ingress_snapshot(directory.path(), 1, b"1000\n", &rows);
+    assert_eq!(
+        run(
+            "nvx-ingress",
+            [OsStr::new("test"), directory.path().as_os_str()]
+        ),
+        (
+            Some(0),
+            [
+                b"0 4e56584c01000000\n".as_slice(),
+                b"1000 4e56584c0100000111011c21\n",
+            ]
+            .concat(),
+            Vec::new(),
+        )
+    );
+}
+
+#[test]
+fn ingress_rejects_bad_invocations_and_test_snapshots() {
+    let usage = b"usage: nvx-ingress GATEWAY_IPV4\n".to_vec();
+    assert_eq!(
+        run("nvx-ingress", std::iter::empty::<&str>()),
+        (Some(2), Vec::new(), usage.clone())
+    );
+    assert_eq!(
+        run("nvx-ingress", ["not-an-ipv4-address"]),
+        (Some(2), Vec::new(), usage)
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        run(
+            "nvx-ingress",
+            [OsStr::new("test"), directory.path().as_os_str()]
+        ),
+        (Some(1), Vec::new(), Vec::new())
+    );
+    write_ingress_snapshot(directory.path(), 0, b"bad\n", &[]);
+    assert_eq!(
+        run(
+            "nvx-ingress",
+            [OsStr::new("test"), directory.path().as_os_str()]
+        ),
+        (Some(1), Vec::new(), Vec::new())
+    );
+    write_ingress_snapshot(directory.path(), 0, b"7\n", &[]);
+    write_ingress_snapshot(directory.path(), 1, b"bad\n", &[]);
+    assert_eq!(
+        run(
+            "nvx-ingress",
+            [OsStr::new("test"), directory.path().as_os_str()]
+        ),
+        (Some(1), b"7 4e56584c01000000\n".to_vec(), Vec::new(),)
+    );
+
+    let overlong = std::ffi::OsString::from_vec(vec![b'a'; 4094]);
+    assert_eq!(
+        run("nvx-ingress", [OsStr::new("test"), &overlong]),
+        (Some(1), Vec::new(), Vec::new())
+    );
 }

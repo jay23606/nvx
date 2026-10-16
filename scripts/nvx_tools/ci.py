@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -163,6 +164,29 @@ class CiChanges:
                 strict=True,
             )
         )
+
+
+def kernel_patch_identity(patch_root: Path) -> str:
+    """Return a digest of each patch's relative path and content, in path order.
+
+    A content-only hash ignores names and order, so renaming a patch reused a
+    kernel whose provenance still named the old path. Both are part of the key.
+    The file set matches the top-level ``*.patch`` files that kernel provenance
+    records, so unrelated files do not change the key and a missing or empty
+    directory fails instead of producing the empty digest.
+    """
+    files = sorted(
+        (path.relative_to(patch_root).as_posix(), path)
+        for path in patch_root.glob("*.patch")
+        if path.is_file()
+    )
+    if not files:
+        raise ScriptError("no kernel patches were found")
+    digest = hashlib.sha256()
+    for relative, path in files:
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()[:16]
 
 
 def classify_ci_changes(event_name: str, changed_files: Sequence[str]) -> CiChanges:

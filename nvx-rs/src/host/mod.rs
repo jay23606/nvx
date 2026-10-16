@@ -12,6 +12,11 @@
 //! - [`session`] speaks the authenticated control protocol, [`process`] launches and terminates
 //!   OpenVMM processes, and [`platform`] holds the primitives of Linux and Windows hosts. Other
 //!   hosts compile but report NVX as unavailable.
+//!
+//! The host modules deny unsafe code. On Unix, the private `sys` module confines the system calls
+//! that the standard library lacks behind documented safe functions, which call `nix`. The
+//! Windows platform module still calls `windows-sys` directly.
+#![deny(unsafe_code)]
 
 pub mod artifacts;
 pub mod filesystem;
@@ -22,3 +27,6 @@ pub mod platform;
 pub mod process;
 pub mod report;
 pub mod session;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod sys;

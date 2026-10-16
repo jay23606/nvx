@@ -1,34 +1,77 @@
-//! Safe operating-system interface shared by the guest tools.
+//! Safe operating-system interface shared by the guest programs.
 //!
 //! Guest program modules deny unsafe code. This module is their only boundary to the operating
 //! system, through `nix`: it owns descriptors and mappings, and its submodules confine the few
-//! unsafe `nix` operations, such as ioctls, memory mappings, and signal dispositions, behind
-//! wrappers that establish their pointer, lifetime, and ownership invariants. Errors are `nix`'s
-//! [`Errno`], whose descriptions the tools print.
+//! unsafe `nix` operations, such as ioctls, memory mappings, signal dispositions, and `fork`,
+//! behind wrappers that establish their pointer, lifetime, and ownership invariants. Errors are
+//! `nix`'s [`Errno`], whose descriptions the programs print. It also builds and decodes the
+//! kernel's binary interfaces that `nix` does not model, such as the netlink messages of socket
+//! diagnostics, as explicit byte layouts, so that the programs handle only typed values.
+//!
+//! A descriptor that this module opens keeps one owner, its wrapper here, such as
+//! `FileDescriptor`, and the programs read and write it only through that wrapper, never through
+//! a second owner, such as a `std::fs::File` made from its number. `FileDescriptor` implements
+//! `std::io::Read` with one `read` system call per call, as `std::fs::File` does, so that a
+//! standard-library adapter such as `BufReader` can hold it and add the only buffer in front of
+//! it. Standard output and standard error belong to the process: `Stdout`, `DirectStdout`, and
+//! `write_standard_error` borrow them from the standard library's handles only to write them
+//! directly, so the standard library's line buffer for standard output must stay empty, which
+//! the guest module ensures by denying the standard library's print macros.
+//!
+//! The managed agent needs a few operations that `nix` cannot provide, which reach libc through
+//! `nix`'s re-export: its forked child, which may neither allocate nor drop an owner, closes,
+//! executes, and exits through libc; its wait-status decoding keeps the real-time signals that
+//! `nix`'s `Signal` cannot represent; and its execution helper duplicates the descriptor that it
+//! inherits by number, which it cannot borrow before it knows that the descriptor is open. Each
+//! such call says why.
 
-#[cfg(target_arch = "x86_64")]
 mod clock;
 mod fd;
+mod filesystem;
 mod ioctl;
 mod mapping;
+mod poll;
 mod process;
+mod sock_diag;
 mod socket;
+mod spawn;
+mod terminal;
 
 use std::ffi::CString;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStringExt;
 
 pub(crate) use nix::errno::Errno;
+pub(crate) use nix::sys::signal::Signal;
 
+pub(crate) use clock::monotonic_ms;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use clock::monotonic_ns;
-#[cfg(test)]
-pub(crate) use fd::create_fifo;
-pub(crate) use fd::{FileDescriptor, FileLock, Mode, OpenFlags, create_directory, open, page_size};
+pub(crate) use fd::{
+    FileDescriptor, Mode, OpenFlags, create_directory, create_fifo, create_memfd, create_pipe,
+    open, page_size, unlink,
+};
+pub(crate) use filesystem::{
+    MountFlags, change_directory, chmod, chown, current_directory, mount, path_c_string,
+};
 pub(crate) use ioctl::{console_pending, reseed_random};
 pub(crate) use mapping::MemoryMapping;
-pub(crate) use process::{DirectStdout, Stdout, restore_sigpipe};
-pub(crate) use socket::connect_datagram;
+pub(crate) use poll::readable_or_hung_up;
+#[cfg(test)]
+pub(crate) use process::sigpipe_disposition;
+pub(crate) use process::{
+    ChildStatus, DirectStdout, ProcessId, Stdout, exec, has_exited, ignore_interrupt_and_hangup,
+    kill_process_group, reap_any_nonblocking, restore_sigpipe, take_inherited_descriptor, wait,
+    with_sigpipe_ignored, write_port_diagnostic, write_standard_error,
+};
+pub(crate) use sock_diag::{
+    INET_DIAG_BUFFER_LENGTH, InetDiagMessage, decode_inet_diag_dump, dump_ipv6_tcp_sockets,
+};
+#[cfg(test)]
+pub(crate) use sock_diag::{encode_inet_diag_done, encode_inet_diag_socket};
+pub(crate) use socket::{UdpSocket, connect_datagram};
+pub(crate) use spawn::{CHILD_STAGE_CWD, PhysicalPwd, SpawnDescriptors, SpawnPlan, spawn};
+pub(crate) use terminal::{configure_raw, drain};
 
 /// Returns the process arguments, program name first, as the C strings that `main` received.
 ///
@@ -39,6 +82,11 @@ pub(crate) fn args() -> Vec<CString> {
     std::env::args_os()
         .map(|argument| CString::new(argument.into_vec()).expect("arguments are C strings"))
         .collect()
+}
+
+/// Converts arbitrary bytes into a C string, or `EINVAL` if they contain a NUL.
+pub(crate) fn c_string(bytes: &[u8]) -> Result<CString, Errno> {
+    CString::new(bytes).map_err(|_| Errno::EINVAL)
 }
 
 /// Writes the concatenation of `parts` to `stream` in one write.
@@ -61,22 +109,8 @@ pub(crate) fn print(stream: &mut dyn Write, bytes: &[u8]) -> Result<(), Errno> {
 ///
 /// A write that made no progress has no OS error, so it maps to `EIO`, matching the guest tools'
 /// generic I/O-failure treatment.
-fn errno_of(error: &io::Error) -> Errno {
+pub(crate) fn errno_of(error: &io::Error) -> Errno {
     error.raw_os_error().map_or(Errno::EIO, Errno::from_raw)
-}
-
-/// Repeats a safe system operation while it fails with `EINTR`.
-///
-/// The first success or non-interruption error is returned. Callers use this only where the C
-/// implementation had an explicit retry loop; operations such as seed-file reads deliberately
-/// call their wrapper directly.
-pub(crate) fn retry<T>(mut operation: impl FnMut() -> Result<T, Errno>) -> Result<T, Errno> {
-    loop {
-        match operation() {
-            Err(Errno::EINTR) => {}
-            result => return result,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -124,49 +158,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn retry_repeats_only_after_eintr() {
-        let mut results = vec![Err(Errno::EINTR), Err(Errno::EINTR), Ok(3)].into_iter();
-        let mut calls = 0;
-        let result = retry(|| {
-            calls += 1;
-            results.next().expect("one result per call")
-        });
-        assert_eq!((result, calls), (Ok(3), 3));
-
-        let mut calls = 0;
-        let result: Result<usize, Errno> = retry(|| {
-            calls += 1;
-            Err(Errno::EIO)
-        });
-        assert_eq!((result, calls), (Err(Errno::EIO), 1));
-    }
-
-    #[test]
     fn explicit_close_reports_errno() {
         let descriptor = open(c"/dev/null", OpenFlags::O_RDONLY, Mode::empty()).unwrap();
         assert_eq!(descriptor.close(), Ok(()));
     }
 
     #[test]
-    fn file_locks_are_exclusive_until_their_scope_ends() {
-        use nix::fcntl::{Flock, FlockArg};
+    fn descriptors_read_through_the_standard_io_traits() {
+        use std::io::{BufRead, BufReader, Read};
 
         let file = tempfile::NamedTempFile::new().unwrap();
-        let path = CString::new(file.path().to_str().unwrap()).unwrap();
-        let try_lock = || {
-            Flock::lock(
-                std::fs::File::open(file.path()).unwrap(),
-                FlockArg::LockExclusiveNonblock,
-            )
-        };
-        {
-            let _lock = open(&path, OpenFlags::O_RDWR, Mode::empty())
-                .unwrap()
-                .lock_exclusive()
-                .unwrap();
-            assert_eq!(try_lock().map(|_| ()).unwrap_err().1, Errno::EWOULDBLOCK);
-        }
-        assert!(try_lock().is_ok());
+        std::fs::write(file.path(), b"ab\ncd").unwrap();
+        let path = path_c_string(file.path()).unwrap();
+        let flags = OpenFlags::O_RDONLY | OpenFlags::O_CLOEXEC;
+        let mut reader = BufReader::new(open(&path, flags, Mode::empty()).unwrap());
+        let mut line = Vec::new();
+        assert_eq!(reader.read_until(b'\n', &mut line).unwrap(), 3);
+        assert_eq!(line, b"ab\n");
+        let mut rest = Vec::new();
+        assert_eq!(reader.read_to_end(&mut rest).unwrap(), 2);
+        assert_eq!(rest, b"cd");
+
+        let mut directory = open(c"/", flags, Mode::empty()).unwrap();
+        let error = directory.read_to_end(&mut Vec::new()).unwrap_err();
+        assert_eq!(errno_of(&error), Errno::EISDIR);
     }
 
     #[test]

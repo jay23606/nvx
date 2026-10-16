@@ -4088,7 +4088,6 @@ class MicrovmTests(unittest.TestCase):
             snapshot,
         )
         self.assertIn('export NVX_VM_GENERATION_ID="$generation_id"', snapshot)
-        self.assertNotIn("nvx-port-io", snapshot)
         self.assertNotIn("/dev/port", snapshot)
         self.assertIn('[ "$range_count" -eq 0 ]', snapshot)
         self.assertIn("PACKET_ACK_REQUIRED=4", snapshot)

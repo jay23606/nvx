@@ -36,6 +36,7 @@ python3 scripts/nvx.py performance gate --help
 | `materialize-kernel-provenance-inputs` | Write kernel provenance inputs from raw run-head blobs. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `classify-ci-changes` | Select the CI suites that a list of changed files runs. |
+| `kernel-patch-identity` | Print the digest of the kernel patch paths and contents that keys the kernel cache. |
 | `check-required-ci` | Validate required GitHub Actions job results. |
 | `check-static-elf` | Check that executables are static ELF files without an interpreter. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
@@ -84,6 +85,17 @@ python3 scripts/nvx.py setup-cross-os-cache
 ```
 
 Installs the GNU tar and zstd tools used by GitHub Actions cross-OS caches.
+
+### `kernel-patch-identity`
+
+```text
+python3 scripts/nvx.py kernel-patch-identity [--root PATH]
+```
+
+Prints a digest of each file under `kernel/patches/` by relative path, in path
+order, together with its content. The guest build appends it to both kernel
+cache keys, because `hashFiles` hashes contents only: a renamed patch changes
+the key even when its bytes do not.
 
 ### `classify-ci-changes`
 
@@ -161,11 +173,15 @@ python3 scripts/nvx.py build-guest-binaries --output DIRECTORY
 ```
 
 The Linux-only build command checks the exact `rust-toolchain.toml` pin and
-builds the six PR 1 guest executables for `x86_64-unknown-linux-musl` with one
+builds the seven Rust guest executables for `x86_64-unknown-linux-musl` with one
 `cargo build` of the `guest` profile, a fresh target directory, Cargo's locked
 mode, incremental compilation disabled, inherited Cargo profile overrides
 removed, remapped source paths, and no linker build IDs. It runs the static-ELF
 check and writes `manifest.json` with the source and executable SHA-256 digests.
+It updates the output of an earlier build in place, adding `nvx-managed-agent`
+and `nvx-ingress` when that build's manifest does not record them and removing
+the retired `nvx-port-io` executable when that build's manifest records it, and
+refuses any other existing `DIRECTORY`.
 
 ### `test-guest-binaries`
 
@@ -173,7 +189,7 @@ check and writes `manifest.json` with the source and executable SHA-256 digests.
 python3 scripts/nvx.py test-guest-binaries --binaries DIRECTORY
 ```
 
-The Linux-only test command validates the six binaries and build manifest,
+The Linux-only test command validates the seven binaries and build manifest,
 sets `NVX_GUEST_BINARIES`, and runs the musl `guest_tools` integration test
 against that exact directory.
 

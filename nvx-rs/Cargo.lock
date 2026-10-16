@@ -152,7 +152,6 @@ name = "nvx-rs"
 version = "0.1.0"
 dependencies = [
  "getrandom",
- "libc",
  "nix",
  "serde",
  "serde_json",

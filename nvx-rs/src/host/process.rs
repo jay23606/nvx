@@ -161,9 +161,9 @@ pub fn kill(pid: u32, start_time: u64) -> io::Result<bool> {
 mod tests {
     use std::fs;
     use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
 
     use super::*;
+    use crate::host::sys;
 
     /// Spawns a long-running child while this process holds an inheritable pipe writer, as a
     /// descriptor that the caller's parent or native code left without close-on-exec would be.
@@ -173,11 +173,7 @@ mod tests {
     fn child_inherits_writer(spawn: impl FnOnce() -> Child) -> bool {
         let (pipe, child) = {
             let (_, writer) = io::pipe().unwrap();
-            // SAFETY: clearing FD_CLOEXEC only changes the flags of a descriptor this test owns.
-            assert_eq!(
-                unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFD, 0) },
-                0
-            );
+            sys::clear_close_on_exec(&writer).unwrap();
             let pipe = fs::read_link(format!("/proc/self/fd/{}", writer.as_raw_fd())).unwrap();
             (pipe, Reaped(spawn()))
         };
@@ -220,8 +216,7 @@ mod tests {
         // Kernels without CLOSE_RANGE_CLOEXEC take the /proc/self/fd fallback.
         let fallback = || {
             let mut command = sleeper();
-            // SAFETY: the fallback allocates nothing and makes only async-signal-safe calls.
-            unsafe { command.pre_exec(platform::mark_listed_descriptors_close_on_exec) };
+            sys::mark_listed_descriptors_on_spawn(&mut command);
             command.spawn().unwrap()
         };
         assert!(!child_inherits_writer(fallback));

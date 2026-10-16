@@ -179,11 +179,18 @@ class GuestRustBuildConstants:
     BINARIES: Final = (
         "nvx-console-pending",
         "nvx-mmio-write",
-        "nvx-port-io",
         "nvx-reseed",
         "nvx-exit",
         "nvx-device-io",
+        "nvx-managed-agent",
+        "nvx-ingress",
     )
+    # Executables that earlier builds produced. A build removes them from the output
+    # of an earlier build whose manifest records them.
+    RETIRED_BINARIES: Final = ("nvx-port-io",)
+    # Executables that earlier builds lacked. A build adds them to the output of an
+    # earlier build whose manifest does not record them.
+    ADDED_BINARIES: Final = ("nvx-managed-agent", "nvx-ingress")
 
 
 class AlpineBuildConstants:
@@ -367,7 +374,6 @@ class InitramfsBuildConstants:
     STATIC_HELPERS: Final = (
         "nvx-reseed",
         "nvx-mmio-write",
-        "nvx-port-io",
         "nvx-console-pending",
         "nvx-managed-agent",
     )

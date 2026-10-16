@@ -16,6 +16,7 @@ mod linux;
 mod other;
 #[cfg(windows)]
 /// Windows implementations of host process, pipe, and hypervisor primitives.
+#[allow(unsafe_code)]
 mod windows;
 
 #[cfg(target_os = "linux")]
