@@ -7,6 +7,7 @@ import io
 import json
 import re
 import statistics
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -2388,6 +2389,75 @@ class PerformanceTests(unittest.TestCase):
                     root / "results",
                     lifecycle_input=lifecycle_path,
                 )
+
+    def test_persist_drops_rows_measured_before_a_later_history_reset(self):
+        # A row measured before a commit that reset its metric must not refill the reset
+        # series, or nine post-reset rows would already gate the metric. Unaffected metrics
+        # measured at the same commit still persist.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            def commit(message: str) -> str:
+                git("add", "data")
+                git("commit", "-q", "--allow-empty", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            history = repo / "data"
+            source = repo / "source"
+            history_file = history / "linux-kvm.csv"
+            source_file = source / "linux-kvm.csv"
+            performance.write_results(
+                history_file,
+                [
+                    performance.Result("seed", "latency", "ms", "lower", 10.0),
+                    performance.Result("seed", "throughput", "MB/s", "higher", 20.0),
+                ],
+            )
+            measured = commit("seed")
+
+            # Commit B resets only the latency metric; throughput keeps its history.
+            performance.write_results(
+                history_file,
+                [performance.Result("seed", "throughput", "MB/s", "higher", 20.0)],
+            )
+            commit("reset latency")
+
+            for number in range(9):
+                sha = commit(f"post-reset {number}")
+                performance.write_results(
+                    source_file,
+                    [performance.Result(sha, "latency", "ms", "lower", 100.0)],
+                )
+                performance.persist_results(source, history, git_checkout=repo)
+
+            # The measurement of A arrives after the reset. It must not refill latency.
+            performance.write_results(
+                source_file,
+                [
+                    performance.Result(measured, "latency", "ms", "lower", 10.0),
+                    performance.Result(measured, "throughput", "MB/s", "higher", 20.0),
+                ],
+            )
+            performance.persist_results(source, history, git_checkout=repo)
+
+            rows = performance.read_results(history_file)
+            latency = [row for row in rows if row.metric == "latency"]
+            throughput = [row for row in rows if row.metric == "throughput"]
+            self.assertEqual(len(latency), 9)
+            self.assertNotIn(measured, {row.commit for row in latency})
+            self.assertEqual({row.commit for row in throughput}, {"seed", measured})
 
     def test_persist_and_gate_isolate_processor_counts(self):
         with tempfile.TemporaryDirectory() as temporary:

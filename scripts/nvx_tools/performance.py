@@ -9,9 +9,10 @@ import math
 import os
 import re
 import statistics
+import subprocess
 import sys
 import tempfile
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -2248,11 +2249,121 @@ def _verify_result_hosts(
             )
 
 
+def _git(checkout: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(checkout), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise PerformanceError(
+            f"git {' '.join(args)} failed: {completed.stderr.strip()}"
+        )
+    return completed.stdout
+
+
+def _committed_results(top: Path, revision: str, relative: str) -> list[Result]:
+    shown = subprocess.run(
+        ["git", "-C", str(top), "show", f"{revision}:{relative}"],
+        check=False,
+        capture_output=True,
+    )
+    if shown.returncode != 0:
+        return []
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "history.csv"
+        path.write_bytes(shown.stdout)
+        return read_results(path)
+
+
+def _reset_dimensions_since(
+    git_checkout: Path,
+    history_path: Path,
+    commit: str,
+) -> set[tuple[str, int, int, str]]:
+    """Return the dimensions whose committed history lost rows after ``commit``.
+
+    A result measured at ``commit`` predates any later commit that removes the
+    dimension's rows, so it must not be appended onto the reset series.
+    """
+    top = Path(_git(git_checkout, "rev-parse", "--show-toplevel").strip()).resolve()
+    try:
+        relative = history_path.resolve().relative_to(top).as_posix()
+    except ValueError as error:
+        raise PerformanceError(f"{history_path} is outside the git checkout") from error
+    ancestor = subprocess.run(
+        ["git", "-C", str(top), "merge-base", "--is-ancestor", commit, "HEAD"],
+        check=False,
+        capture_output=True,
+    )
+    if ancestor.returncode != 0:
+        raise PerformanceError(
+            f"result commit {commit} is not an ancestor of the target history"
+        )
+    later = _git(
+        top,
+        "log",
+        "--reverse",
+        "--format=%H",
+        f"{commit}..HEAD",
+        "--",
+        relative,
+    ).split()
+    previous = Counter(
+        _dimension_key(result, "")
+        for result in _committed_results(top, commit, relative)
+    )
+    resets: set[tuple[str, int, int, str]] = set()
+    for revision in later:
+        current = Counter(
+            _dimension_key(result, "")
+            for result in _committed_results(top, revision, relative)
+        )
+        resets.update(key for key, count in previous.items() if current[key] < count)
+        previous = current
+    return resets
+
+
+def _without_reset_rows(
+    git_checkout: Path,
+    history_path: Path,
+    results: Sequence[Result],
+) -> list[Result]:
+    resets: dict[str, set[tuple[str, int, int, str]]] = {}
+    kept: list[Result] = []
+    for result in results:
+        if result.commit not in resets:
+            resets[result.commit] = _reset_dimensions_since(
+                git_checkout, history_path, result.commit
+            )
+        if _dimension_key(result, "") in resets[result.commit]:
+            print(
+                f"Skipped {result.metric} measured at {result.commit[:12]}: "
+                f"{history_path.name} was reset after that commit"
+            )
+            continue
+        kept.append(result)
+    return kept
+
+
+def _git_checkout_of(path: Path) -> Path | None:
+    """Return ``path`` when it lies inside a git checkout, which CI always does."""
+    probe = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return path if probe.returncode == 0 and probe.stdout.strip() == "true" else None
+
+
 def persist_results(
     source_dir: Path,
     history_dir: Path,
     excluded_metrics: Iterable[str] = (),
     require_host: bool = False,
+    git_checkout: Path | None = None,
 ) -> None:
     source_files = sorted(source_dir.glob("*.csv"))
     if not source_files:
@@ -2306,6 +2417,8 @@ def persist_results(
             for result in current
             if _result_identity(result) not in existing_keys
         ]
+        if git_checkout is not None:
+            new_results = _without_reset_rows(git_checkout, history_path, new_results)
         if not new_results:
             print(f"No new performance rows to persist for {source_path.name}")
             continue
@@ -2916,6 +3029,7 @@ def command_performance(args: argparse.Namespace) -> int:
             args.history_dir,
             args.exclude_metric,
             require_host=args.require_host,
+            git_checkout=_git_checkout_of(args.history_dir),
         )
         return 0
     except (PerformanceError, OSError, csv.Error) as error:
