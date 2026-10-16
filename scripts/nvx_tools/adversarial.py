@@ -563,13 +563,26 @@ class ExecutorClient:
             cleanup_error = error
         finally:
             self._closed = True
-            for stream in (self._stdin, self._stdout, self._stderr_stream):
+            for stream in (self._stdin, self._stderr_stream):
                 try:
                     stream.close()
                 except OSError as error:
                     if cleanup_error is None:
                         cleanup_error = error
             self._reader.join(timeout=2.0)
+            if self._reader.is_alive():
+                # A process that outlived the wrapper still holds stdout. Closing the buffered
+                # stream would wait for the blocked reader, so leave it to the daemon thread.
+                if cleanup_error is None:
+                    cleanup_error = ScriptError(
+                        "executor output is still held open by a surviving process"
+                    )
+            else:
+                try:
+                    self._stdout.close()
+                except OSError as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
         if cleanup_error is not None:
             raise cleanup_error
 
