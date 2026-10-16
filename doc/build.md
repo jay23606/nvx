@@ -165,12 +165,11 @@ complete per-scenario logs under
 `build/test-results/microvm` by default.
 
 The Alpine initramfs includes the sandbox PID-1 bootstrap, its container namespace
-helpers, the static `nvx-device-io` benchmark helper, the static `nvx-port-io`
-port helper (single-byte port reads and writes, and the VM generation ID read),
-the static `nvx-time-probe` guest time probe, and the
-static `nvx-time` guest time component under `/sbin`. The probe measures TSC and
-clock read latency, reports the guest's clock, clocksource, TSC flags, and
-hypervisor identity, and runs the cross-vCPU warp test that the
+helpers, the static `nvx-device-io` benchmark helper, the static `nvx-time-probe`
+guest time probe, and the static `nvx-time` guest time component under `/sbin`.
+The probe measures TSC and clock read latency, reports the guest's clock,
+clocksource, TSC flags, and hypervisor identity, and runs the cross-vCPU warp
+test that the
 [time ABI](design/3.2-clock-and-time.md#327-cross-processor-consistency) uses to enforce its 1 µs
 skew bound. `nvx-time` implements the time ABI's
 [guest obligations](design/3.2-clock-and-time.md#3210-guest-obligations): the conformance

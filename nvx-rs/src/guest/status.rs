@@ -6,7 +6,7 @@ use std::process::ExitCode;
 ///
 /// A program exits with [`Success`](Self::Success), or with the status that its
 /// [`CommandError`] selects. Only `nvx-device-io` exits with the benchmark statuses 3, 4, and
-/// 255.
+/// 255, and only `nvx-managed-agent` exits with 125.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum ExitStatus {
@@ -20,6 +20,8 @@ pub(crate) enum ExitStatus {
     SetupFailure = 3,
     /// A benchmark transfer or send was incomplete.
     TransferFailure = 4,
+    /// The managed agent, or its execution helper before it executed the workload, failed.
+    AgentFailure = 125,
     /// A benchmark could not write its result.
     OutputFailure = 255,
 }
@@ -37,6 +39,9 @@ pub(crate) enum CommandError {
     Transfer,
     /// A benchmark could not write its result.
     Output,
+    /// The managed agent or its execution helper failed for any reason, including an invalid
+    /// command line. It has reported why where its C program did.
+    Agent,
 }
 
 impl From<Result<(), CommandError>> for ExitStatus {
@@ -48,6 +53,7 @@ impl From<Result<(), CommandError>> for ExitStatus {
             Err(CommandError::Setup) => Self::SetupFailure,
             Err(CommandError::Transfer) => Self::TransferFailure,
             Err(CommandError::Output) => Self::OutputFailure,
+            Err(CommandError::Agent) => Self::AgentFailure,
         }
     }
 }
@@ -70,6 +76,7 @@ mod tests {
             (Err(CommandError::Usage), 2),
             (Err(CommandError::Setup), 3),
             (Err(CommandError::Transfer), 4),
+            (Err(CommandError::Agent), 125),
             (Err(CommandError::Output), 255),
         ];
         for (result, code) in cases {

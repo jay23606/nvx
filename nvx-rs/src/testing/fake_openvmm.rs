@@ -614,18 +614,12 @@ trait Pending {
 #[cfg(unix)]
 impl Pending for std::os::unix::net::UnixStream {
     fn pending(&mut self) -> io::Result<bool> {
-        use std::os::fd::AsRawFd;
+        use std::os::fd::AsFd;
 
-        let mut descriptor = libc::pollfd {
-            fd: self.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: the descriptor array has one valid entry, and a zero timeout only polls.
-        match unsafe { libc::poll(&mut descriptor, 1, 0) } {
-            -1 => Err(io::Error::last_os_error()),
-            ready => Ok(ready > 0),
-        }
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+
+        let mut descriptors = [PollFd::new(self.as_fd(), PollFlags::POLLIN)];
+        Ok(poll(&mut descriptors, PollTimeout::ZERO)? > 0)
     }
 }
 

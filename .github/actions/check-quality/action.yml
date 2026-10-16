@@ -61,6 +61,10 @@ runs:
         ${SHFMT} -d -ln bash -i 4 -ci \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 
+    - name: Check Markdown links
+      shell: bash
+      run: python scripts/check_markdown_links.py
+
     - name: Test Specula CI wiring
       shell: bash
       working-directory: .github/specula

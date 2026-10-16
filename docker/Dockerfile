@@ -62,7 +62,7 @@ RUN python3 scripts/nvx.py verify-guest-determinism \
 FROM base AS azurelinux-helpers
 RUN set -eux; \
     mkdir -p /out/helpers; \
-    for helper in nvx-reseed nvx-mmio-write nvx-port-io nvx-console-pending nvx-managed-agent; do \
+    for helper in nvx-reseed nvx-mmio-write nvx-console-pending nvx-managed-agent; do \
         cc -static -Os -s -Wall -Wextra -Werror -o "/out/helpers/$helper" "/repo/guest/common/$helper.c"; \
     done; \
     for helper in nvx-time nvx-exit nvx-ingress; do \

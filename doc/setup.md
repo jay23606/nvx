@@ -212,9 +212,11 @@ shfmt -d -ln posix -i 4 -ci \
   scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
 shfmt -d -ln bash -i 4 -ci \
   .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
+python3 scripts/check_markdown_links.py
 ```
 
-Pyright runs in strict mode for both Linux and Windows platform APIs.
+Pyright runs in strict mode for both Linux and Windows platform APIs. The link
+check reads the files that Git tracks, so stage a new file before you run it.
 
 ### Adversarial campaign controller
 

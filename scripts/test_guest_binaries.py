@@ -8,9 +8,10 @@ import os
 import sys
 import tempfile
 import unittest
+from collections.abc import Generator
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
@@ -19,6 +20,63 @@ from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
     GuestRustBuildConstants,
 )
+
+
+def _write_build_output(
+    output: Path, binaries: tuple[str, ...], *, recorded: tuple[str, ...]
+) -> None:
+    """Write the output of an earlier build whose manifest records ``recorded``."""
+    output.mkdir()
+    for binary in binaries:
+        (output / binary).write_bytes(f"previous {binary}".encode())
+    manifest = {
+        "domain": GuestRustBuildConstants.BUILD_MANIFEST_DOMAIN,
+        "format": GuestRustBuildConstants.BUILD_MANIFEST_FORMAT,
+        "binaries": {binary: "0" * 64 for binary in recorded},
+    }
+    (output / GuestRustBuildConstants.BUILD_MANIFEST_NAME).write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+
+def _contents(directory: Path) -> dict[str, bytes]:
+    """Return the name and contents of every file in a directory."""
+    return {path.name: path.read_bytes() for path in directory.iterdir()}
+
+
+@contextlib.contextmanager
+def _fake_guest_build() -> Generator[MagicMock]:
+    """Stand for Cargo, which writes each binary's name as its contents."""
+
+    def run_cargo(
+        command: list[str | os.PathLike[str]],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> None:
+        rendered = [os.fspath(part) for part in command]
+        destination = (
+            Path(env["CARGO_TARGET_DIR"])
+            / GuestRustBuildConstants.TARGET
+            / GuestRustBuildConstants.PROFILE
+        )
+        destination.mkdir(parents=True, exist_ok=True)
+        for index, value in enumerate(rendered):
+            if value == "--bin":
+                name = rendered[index + 1]
+                (destination / name).write_bytes(name.encode())
+
+    cargo = MagicMock(side_effect=run_cargo)
+    with (
+        patch.object(guest_binaries.sys, "platform", "linux"),
+        patch.object(
+            guest_binaries, "guest_binary_source_sha256", return_value="a" * 64
+        ),
+        patch.object(guest_binaries, "require_tool", return_value="cargo"),
+        patch.object(guest_binaries, "run_checked", cargo),
+        patch.object(guest_binaries, "check_static_executables"),
+    ):
+        yield cargo
 
 
 class GuestBinaryBuildTests(unittest.TestCase):
@@ -255,6 +313,125 @@ class GuestBinaryBuildTests(unittest.TestCase):
             ):
                 guest_binaries._validate_output_path(output.resolve())
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+
+    def test_rebuild_removes_a_retired_executable_that_the_manifest_records(self):
+        # Otherwise, a build would remove an executable that it has just installed.
+        self.assertTrue(
+            set(GuestRustBuildConstants.RETIRED_BINARIES).isdisjoint(
+                GuestRustBuildConstants.BINARIES
+            )
+        )
+        with tempfile.TemporaryDirectory(
+            prefix=".test-guest-binary-retired-",
+            dir=BuildConstants.REPO_ROOT,
+        ) as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            # The output of a build from before nvx-port-io retired.
+            previous = (*GuestRustBuildConstants.BINARIES, "nvx-port-io")
+            _write_build_output(output, previous, recorded=previous)
+            with _fake_guest_build():
+                result = guest_binaries.build_guest_binaries(output)
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {
+                    GuestRustBuildConstants.BUILD_MANIFEST_NAME,
+                    *GuestRustBuildConstants.BINARIES,
+                },
+            )
+            for binary in GuestRustBuildConstants.BINARIES:
+                self.assertEqual((output / binary).read_bytes(), binary.encode())
+            manifest = json.loads(
+                (output / GuestRustBuildConstants.BUILD_MANIFEST_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["binaries"], result.binaries)
+            self.assertFalse(any(root.glob(".output.work-*")))
+
+    def test_rebuild_adds_an_executable_that_an_earlier_build_lacked(self):
+        # Otherwise, an output could lack an executable that no build installs.
+        self.assertTrue(
+            set(GuestRustBuildConstants.ADDED_BINARIES).issubset(
+                GuestRustBuildConstants.BINARIES
+            )
+        )
+        earlier = tuple(
+            binary
+            for binary in GuestRustBuildConstants.BINARIES
+            if binary not in GuestRustBuildConstants.ADDED_BINARIES
+        )
+        latest = GuestRustBuildConstants.ADDED_BINARIES[-1]
+        predecessor = tuple(
+            binary for binary in GuestRustBuildConstants.BINARIES if binary != latest
+        )
+        for case, previous in (
+            ("build without the added executables", earlier),
+            ("build without the latest added executable", predecessor),
+            ("build from before nvx-port-io retired", (*earlier, "nvx-port-io")),
+        ):
+            with (
+                self.subTest(case),
+                tempfile.TemporaryDirectory(
+                    prefix=".test-guest-binary-added-",
+                    dir=BuildConstants.REPO_ROOT,
+                ) as temporary,
+            ):
+                root = Path(temporary)
+                output = root / "output"
+                _write_build_output(output, previous, recorded=previous)
+                with _fake_guest_build():
+                    result = guest_binaries.build_guest_binaries(output)
+                self.assertEqual(
+                    {path.name for path in output.iterdir()},
+                    {
+                        GuestRustBuildConstants.BUILD_MANIFEST_NAME,
+                        *GuestRustBuildConstants.BINARIES,
+                    },
+                )
+                for binary in GuestRustBuildConstants.BINARIES:
+                    self.assertEqual((output / binary).read_bytes(), binary.encode())
+                manifest = json.loads(
+                    (output / GuestRustBuildConstants.BUILD_MANIFEST_NAME).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(manifest["binaries"], result.binaries)
+                self.assertFalse(any(root.glob(".output.work-*")))
+
+    def test_rebuild_refuses_unrecorded_or_unrelated_files(self):
+        current = GuestRustBuildConstants.BINARIES
+        previous = (*current, "nvx-port-io")
+        unrelated = (*previous, "uncommitted.txt")
+        earlier = tuple(
+            binary
+            for binary in current
+            if binary not in GuestRustBuildConstants.ADDED_BINARIES
+        )
+        for case, binaries, recorded in (
+            ("unrecorded retired executable", previous, current),
+            ("recorded unrelated file", unrelated, unrelated),
+            ("recorded missing added executable", earlier, current),
+        ):
+            with (
+                self.subTest(case),
+                tempfile.TemporaryDirectory(
+                    prefix=".test-guest-binary-unrecorded-",
+                    dir=BuildConstants.REPO_ROOT,
+                ) as temporary,
+            ):
+                output = Path(temporary) / "output"
+                _write_build_output(output, binaries, recorded=recorded)
+                before = _contents(output)
+                with (
+                    _fake_guest_build() as cargo,
+                    self.assertRaisesRegex(
+                        guest_binaries.ScriptError, "not owned by this builder"
+                    ),
+                ):
+                    guest_binaries.build_guest_binaries(output)
+                cargo.assert_not_called()
+                self.assertEqual(_contents(output), before)
 
     def test_initialization_failure_removes_allocated_work_directory(self):
         with tempfile.TemporaryDirectory(

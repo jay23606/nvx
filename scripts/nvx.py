@@ -57,6 +57,7 @@ from nvx_tools.ci import (
     CiChanges,
     classify_ci_changes,
     describe_ci_changes,
+    kernel_patch_identity,
     required_ci_failures,
     run_openvmm_tests,
     run_openvmm_unit_tests,
@@ -386,6 +387,10 @@ def command_classify_ci_changes(args: argparse.Namespace) -> None:
             summary.write(describe_ci_changes(args.event_name, changed_files, changes))
     for name, selected in changes.outputs().items():
         print(f"{name}={str(selected).lower()}")
+
+
+def command_kernel_patch_identity(args: argparse.Namespace) -> None:
+    print(kernel_patch_identity(args.root))
 
 
 def command_check_required_ci(args: argparse.Namespace) -> None:
@@ -1106,6 +1111,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Markdown file to append the reasons for each decision to",
     )
     classify_changes.set_defaults(handler=command_classify_ci_changes)
+
+    patch_identity = subparsers.add_parser(
+        "kernel-patch-identity",
+        help="print the digest of the kernel patch paths and contents that keys the kernel cache",
+    )
+    patch_identity.add_argument(
+        "--root",
+        type=Path,
+        default=BuildConstants.REPO_ROOT / KernelBuildConstants.PATCH_DIRECTORY,
+    )
+    patch_identity.set_defaults(handler=command_kernel_patch_identity)
 
     required_ci = subparsers.add_parser(
         "check-required-ci",

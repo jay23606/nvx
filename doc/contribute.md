@@ -66,13 +66,14 @@ and WHP runner pools, so:
 
 CI runs these checks on GitHub-hosted runners. Run the ones that cover your
 change before you push; [Setup](setup.md#development) lists the commands for
-the Python and shell checks.
+the Python, shell, and link checks.
 
 | Code | Checks | Definition |
 | --- | --- | --- |
 | Python in `scripts/` and `.github/specula/` | Ruff lint and format with 88-column lines, Pyright in strict mode over `scripts/` against Linux and Windows APIs, and the Specula wiring tests. The code targets Python 3.10. | [check-quality](../.github/actions/check-quality/action.yml), [pyproject.toml](../pyproject.toml) |
 | Guest and setup shell scripts | ShellCheck, and shfmt with four-space indentation and indented `case` branches. Scripts are POSIX `sh` unless check-quality checks them as Bash. | [check-quality](../.github/actions/check-quality/action.yml) |
 | `scripts/setup/setup-windows-whp.ps1` | PowerShell syntax | [check-quality](../.github/actions/check-quality/action.yml) |
+| Markdown files and `doc/` paths | Every relative link and image in a tracked Markdown file resolves to a tracked file, and every anchor to a heading slug that GitHub generates, ignoring code. Every `doc/` path that a tracked file mentions resolves too, except the test fixtures that `DOC_PATH_FIXTURES` lists. | [check-quality](../.github/actions/check-quality/action.yml), [check_markdown_links.py](../scripts/check_markdown_links.py) |
 | `aci_edge_sandboxes/` | rustfmt, Clippy and rustdoc with warnings denied, tests, and the minimum supported Rust version; see [Rust crates](ci.md#rust-crates) | [check-aci-edge-sandboxes](../.github/actions/check-aci-edge-sandboxes/action.yml) |
 | `nvx-rs/` | rustfmt, Clippy and rustdoc with warnings denied, tests including a bundled-release fixture, the minimum supported Rust version, a macOS check, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) |
 | NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module, and checks command help, on Linux and Windows | [validate-nvx](../.github/actions/validate-nvx/action.yml) |

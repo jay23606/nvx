@@ -93,8 +93,7 @@ fn host_identity(wanted: bool) -> Option<(u32, u32)> {
     }
     #[cfg(unix)]
     {
-        // SAFETY: geteuid and getegid have no preconditions.
-        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let (uid, gid) = super::sys::effective_ids();
         (uid != 0 && gid != 0).then_some((uid, gid))
     }
     #[cfg(not(unix))]

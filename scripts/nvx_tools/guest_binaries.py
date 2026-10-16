@@ -160,17 +160,36 @@ def _validate_output_path(output: Path) -> None:
         _validate_owned_output(output)
 
 
-def _validate_owned_output(output: Path) -> None:
-    """Require an existing output to be a complete build owned by this tool."""
+def _validate_owned_output(output: Path) -> tuple[str, ...]:
+    """Require an existing output to be a complete build owned by this tool.
+
+    Return the retired executables that the output holds, which its build manifest
+    must record. The output may lack added executables, which its build manifest
+    must not record.
+    """
     if not output.is_dir():
         raise ScriptError(
             f"guest binary output exists and is not a directory: {output}"
         )
+    actual = {entry.name for entry in output.iterdir()}
+    retired = tuple(
+        binary
+        for binary in GuestRustBuildConstants.RETIRED_BINARIES
+        if binary in actual
+    )
+    missing = tuple(
+        binary
+        for binary in GuestRustBuildConstants.ADDED_BINARIES
+        if binary not in actual
+    )
+    present = tuple(
+        binary for binary in GuestRustBuildConstants.BINARIES if binary not in missing
+    )
     expected = {
         GuestRustBuildConstants.BUILD_MANIFEST_NAME,
-        *GuestRustBuildConstants.BINARIES,
+        *present,
+        *retired,
     }
-    actual = {entry.name for entry in output.iterdir()}
     if actual != expected:
         raise ScriptError(f"guest binary output is not owned by this builder: {output}")
     manifest_path = output / GuestRustBuildConstants.BUILD_MANIFEST_NAME
@@ -192,10 +211,23 @@ def _validate_owned_output(output: Path) -> None:
         raise ScriptError(
             f"guest binary output has an unrecognized build manifest: {manifest_path}"
         )
-    for binary in GuestRustBuildConstants.BINARIES:
+    if retired or missing:
+        recorded = manifest.get("binaries")
+        if (
+            not isinstance(recorded, dict)
+            or not all(
+                binary in cast(dict[str, object], recorded) for binary in retired
+            )
+            or any(binary in cast(dict[str, object], recorded) for binary in missing)
+        ):
+            raise ScriptError(
+                f"guest binary output is not owned by this builder: {output}"
+            )
+    for binary in (*present, *retired):
         path = output / binary
         if not path.is_file() or path.is_symlink():
             raise ScriptError(f"guest binary output has an invalid executable: {path}")
+    return retired
 
 
 def _install_output(staging: Path, output: Path) -> None:
@@ -203,9 +235,13 @@ def _install_output(staging: Path, output: Path) -> None:
     if not output.exists():
         staging.replace(output)
         return
-    _validate_owned_output(output)
+    retired = _validate_owned_output(output)
     for binary in GuestRustBuildConstants.BINARIES:
         (staging / binary).replace(output / binary)
+    # Remove retired executables while the previous manifest still records them, so
+    # that an interrupted installation leaves an output that the next build accepts.
+    for binary in retired:
+        (output / binary).unlink()
     (staging / GuestRustBuildConstants.BUILD_MANIFEST_NAME).replace(
         output / GuestRustBuildConstants.BUILD_MANIFEST_NAME
     )
