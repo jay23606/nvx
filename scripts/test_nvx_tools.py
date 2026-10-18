@@ -12172,6 +12172,51 @@ class SandboxTests(unittest.TestCase):
                     f"{role},layer.erofs,11111111-1111-1111-1111-111111111111"
                 )
 
+    def test_launch_rejects_unsupported_layer_roles_built_directly(self):
+        # Constructing SandboxLaunch directly bypasses parse(); the role must
+        # still be rejected, or ordered_layers() silently drops the layer.
+        for role in ("runtime", "custom"):
+            with (
+                self.subTest(role=role),
+                self.assertRaisesRegex(common.ScriptError, "unsupported layer role"),
+            ):
+                sandbox.SandboxLaunch(
+                    layers=(
+                        sandbox.SandboxLayer(
+                            role=role,
+                            path=Path("layer.erofs"),
+                            uuid="11111111-1111-1111-1111-111111111111",
+                        ),
+                    ),
+                    scratch=Path("scratch.ext4"),
+                )
+
+    def test_managed_deserialize_rejects_unsupported_layer_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layer_path = root / "runtime.erofs"
+            scratch_path = root / "scratch.ext4"
+            layer_path.write_bytes(b"layer")
+            scratch_path.write_bytes(b"scratch")
+            config = {
+                "format": sandbox_lifecycle._config_format(()),
+                "layers": [
+                    {
+                        "role": "runtime",
+                        "path": os.fspath(layer_path),
+                        "uuid": "11111111-1111-1111-1111-111111111111",
+                    }
+                ],
+                "scratch": os.fspath(scratch_path),
+                "hostname": "nvx-sandbox",
+                "workload_uid": 1000,
+                "workload_gid": 1000,
+                "memory_max": None,
+                "pids_max": None,
+            }
+            with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):
+                sandbox_lifecycle._deserialize_launch(config)
+
     def test_layer_parser_rejects_invalid_role_and_uuid(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):
             sandbox.SandboxLayer.parse(

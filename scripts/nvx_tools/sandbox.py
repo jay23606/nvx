@@ -521,6 +521,12 @@ class SandboxLaunch:
     def __post_init__(self) -> None:
         if len(self.layers) != 1:
             raise ScriptError("a sandbox requires exactly one read-only layer: distro")
+        for layer in self.layers:
+            if layer.role not in LAYER_ROLES:
+                raise ScriptError(
+                    f"unsupported layer role {layer.role!r}; "
+                    f"choose {', '.join(LAYER_ROLES)}"
+                )
         if not self.entrypoint.startswith("/") or any(
             character.isspace() for character in self.entrypoint
         ):
